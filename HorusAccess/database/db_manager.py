@@ -3,8 +3,6 @@ import os
 
 class DBManager:
     def __init__(self, db_name="smart_controller.db"):
-        # Βρίσκει τον φάκελο όπου βρίσκεται το τρέχον αρχείο (db_manager.py)
-        # και αποθηκεύει εκεί τη βάση, ώστε να είναι πάντα στο σωστό μέρος.
         current_dir = os.path.dirname(os.path.abspath(__file__))
         self.db_path = os.path.join(current_dir, db_name)
         
@@ -16,11 +14,11 @@ class DBManager:
         return sqlite3.connect(self.db_path)
 
     def _create_tables(self):
-        """Δημιουργεί τους πίνακες αν δεν υπάρχουν ήδη."""
+        """Δημιουργεί τους πίνακες με ενσωματωμένο το threshold."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
-            # Πίνακας Προφίλ (Αυστηρά ID 1 έως 5)
+            # Πίνακας Προφίλ
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS profiles (
                     id INTEGER PRIMARY KEY CHECK (id >= 1 AND id <= 5),
@@ -29,32 +27,26 @@ class DBManager:
                 )
             ''')
             
-            # Πίνακας Αντιστοιχίσεων (Mappings)
+            # Πίνακας Αντιστοιχίσεων (Ενημερωμένος)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS mappings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     profile_id INTEGER,
-                    facial_action TEXT NOT NULL,
+                    action TEXT NOT NULL,
                     mapped_key TEXT NOT NULL,
+                    threshold REAL DEFAULT 0.05,
                     FOREIGN KEY (profile_id) REFERENCES profiles(id),
-                    UNIQUE(profile_id, facial_action)
+                    UNIQUE(profile_id, action)
                 )
             ''')
             conn.commit()
 
     def _initialize_profiles(self):
-        """Δημιουργεί τα 5 default profiles αν η βάση είναι άδεια."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM profiles")
             if cursor.fetchone()[0] == 0:
-                profiles_data = [
-                    (1, "Profile 1", 1.0),
-                    (2, "Profile 2", 1.0),
-                    (3, "Profile 3", 1.0),
-                    (4, "Profile 4", 1.0),
-                    (5, "Profile 5", 1.0)
-                ]
+                profiles_data = [(i, f"Profile {i}", 1.0) for i in range(1, 6)]
                 cursor.executemany('''
                     INSERT INTO profiles (id, name, sensitivity)
                     VALUES (?, ?, ?)
@@ -62,109 +54,55 @@ class DBManager:
                 conn.commit()
 
     # --- ΜΕΘΟΔΟΙ ΓΙΑ ΤΑ ΠΡΟΦΙΛ ---
-
     def get_all_profiles(self):
-        """Επιστρέφει όλα τα προφίλ και τις ρυθμίσεις τους."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT id, name, sensitivity FROM profiles ORDER BY id")
             return cursor.fetchall()
 
     def update_profile_settings(self, profile_id: int, name: str, sensitivity: float):
-        """Ενημερώνει το όνομα και την ευαισθησία ενός συγκεκριμένου προφίλ."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE profiles 
-                SET name = ?, sensitivity = ? 
-                WHERE id = ?
-            ''', (name, sensitivity, profile_id))
+            cursor.execute('UPDATE profiles SET name = ?, sensitivity = ? WHERE id = ?', 
+                           (name, sensitivity, profile_id))
             conn.commit()
 
     # --- ΜΕΘΟΔΟΙ ΓΙΑ ΤΑ MAPPINGS ---
-
-    def save_mapping(self, profile_id: int, facial_action: str, mapped_key: str):
-        """
-        Αποθηκεύει ή ενημερώνει μια αντιστοίχιση.
-        π.χ. save_mapping(1, 'mouth_open', 'space')
-        """
+    def save_mapping(self, profile_id: int, action: str, mapped_key: str, threshold: float = 0.05):
+        """Αποθηκεύει τη νέα κίνηση και το όριό της."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            # Το INSERT OR REPLACE δουλεύει χάρη στο UNIQUE(profile_id, facial_action)
             cursor.execute('''
-                INSERT OR REPLACE INTO mappings (profile_id, facial_action, mapped_key)
-                VALUES (?, ?, ?)
-            ''', (profile_id, facial_action, mapped_key))
+                INSERT OR REPLACE INTO mappings (profile_id, action, mapped_key, threshold)
+                VALUES (?, ?, ?, ?)
+            ''', (profile_id, action, mapped_key, threshold))
             conn.commit()
 
     def get_mappings(self, profile_id: int):
-        """Επιστρέφει όλες τις αντιστοιχίσεις (ως dictionary) για ένα προφίλ."""
+        """Επιστρέφει τις κινήσεις του προφίλ: (id, action, mapped_key, threshold)."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT facial_action, mapped_key 
+                SELECT id, action, mapped_key, threshold 
                 FROM mappings 
                 WHERE profile_id = ?
             ''', (profile_id,))
-            
-            # Μετατροπή των αποτελεσμάτων σε dictionary για εύκολη χρήση στον κώδικα
-            return {row[0]: row[1] for row in cursor.fetchall()}
+            return cursor.fetchall()
 
-    def delete_mapping(self, profile_id: int, facial_action: str):
-        """Διαγράφει μια συγκεκριμένη αντιστοίχιση."""
+    def update_mapping(self, mapping_id: int, new_key: str, new_threshold: float):
+        """Ενημερώνει το πλήκτρο και την ευαισθησία (Από το Review Window)."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                DELETE FROM mappings 
-                WHERE profile_id = ? AND facial_action = ?
-            ''', (profile_id, facial_action))
+                UPDATE mappings 
+                SET mapped_key = ?, threshold = ? 
+                WHERE id = ?
+            ''', (new_key, new_threshold, mapping_id))
             conn.commit()
 
-    def clear_all_profile_mappings(self, profile_id: int):
-        """Καθαρίζει όλες τις αντιστοιχίσεις ενός προφίλ (επαναφορά σε κενό)."""
+    def delete_mapping(self, mapping_id: int):
+        """Διαγράφει οριστικά την κίνηση βάσει του μοναδικού ID."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM mappings WHERE profile_id = ?", (profile_id,))
+            cursor.execute('DELETE FROM mappings WHERE id = ?', (mapping_id,))
             conn.commit()
-    
-    def get_mappings(self, profile_id):
-        """Επιστρέφει όλες τις κινήσεις του προφίλ: (id, action, mapped_key, threshold)."""
-        self.cursor.execute("SELECT id, action, mapped_key, threshold FROM mappings WHERE profile_id = ?", (profile_id,))
-        return self.cursor.fetchall()
-
-    def update_mapping(self, mapping_id, new_key, new_threshold):
-        """Ενημερώνει το πλήκτρο και την ευαισθησία μιας συγκεκριμένης κίνησης."""
-        query = "UPDATE mappings SET mapped_key = ?, threshold = ? WHERE id = ?"
-        self.cursor.execute(query, (new_key, new_threshold, mapping_id))
-        self.conn.commit()
-
-    def delete_mapping(self, mapping_id):
-        """Διαγράφει οριστικά την κίνηση από το προφίλ."""
-        query = "DELETE FROM mappings WHERE id = ?"
-        self.cursor.execute(query, (mapping_id,))
-        self.conn.commit()
-
-# --- Παράδειγμα Χρήσης (Τρέχει μόνο αν εκτελέσεις απευθείας αυτό το αρχείο) ---
-if __name__ == "__main__":
-    db = DBManager()
-    
-    # 1. Έλεγχος προφίλ
-    print("Αρχικά Προφίλ:")
-    print(db.get_all_profiles())
-    
-    # 2. Ενημέρωση ρυθμίσεων προφίλ 1
-    db.update_profile_settings(1, "Gaming Profile", 1.5)
-    
-    # 3. Προσθήκη Mappings
-    db.save_mapping(1, "left_eye_blink", "a")
-    db.save_mapping(1, "right_eye_blink", "d")
-    db.save_mapping(1, "mouth_open", "space")
-    
-    # 4. Ανάγνωση Mappings
-    print("\nMappings για το Profile 1:")
-    print(db.get_mappings(1))
-    
-    # 5. Αλλαγή ενός mapping (επανεγγραφή)
-    db.save_mapping(1, "mouth_open", "enter")
-    print("\nΕνημερωμένα Mappings για το Profile 1:")
-    print(db.get_mappings(1))

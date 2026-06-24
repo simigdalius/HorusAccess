@@ -285,18 +285,63 @@ class MotionRegistrationWindow(ctk.CTkToplevel):
         self.mapping_frame.pack(pady=10)
 
     def save_to_db(self):
-        """Αποθήκευση στη βάση."""
+        """Αποθήκευση στη βάση με Δυναμικό/Προσωποποιημένο Υπολογισμό Ορίου (Threshold)."""
         action = self.action_dropdown.get()
         key = self.key_dropdown.get()
         
-        self.db.save_mapping(self.profile_id, action, key)
-        print(f"Αποθηκεύτηκε: {action} -> {key} στο Προφίλ {self.profile_id}")
+        # --- 1. ΥΠΟΛΟΓΙΣΜΟΣ ΠΡΟΣΩΠΙΚΟΥ ΟΡΙΟΥ ΑΠΟ ΤΑ ΚΑΤΑΓΕΓΡΑΜΜΕΝΑ ΚΑΡΕ ---
+        personal_threshold = 0.05 # Προεπιλογή ασφαλείας
         
-        # Ανανέωση της μνήμης του κεντρικού app (για μηδενικό latency)
-        if hasattr(self.parent, 'refresh_active_mappings'):
-            self.parent.refresh_active_mappings()
+        if hasattr(self.parent, 'recorded_landmarks') and self.parent.recorded_landmarks:
+            metrics = []
+            import math # Σιγουρευόμαστε ότι είναι διαθέσιμο
             
-        self.on_close()
+            # Σαρώνουμε τα ~30 frames που καταγράφηκαν σε αυτό το 1 δευτερόλεπτο
+            for face_landmarks in self.parent.recorded_landmarks:
+                landmarks = face_landmarks.landmark
+                
+                if action == "mouth_open":
+                    dist = math.hypot(landmarks[13].x - landmarks[14].x, landmarks[13].y - landmarks[14].y)
+                    metrics.append(dist)
+                elif action == "smile":
+                    dist = math.hypot(landmarks[61].x - landmarks[291].x, landmarks[61].y - landmarks[291].y)
+                    metrics.append(dist)
+                elif action == "left_eye_blink":
+                    dist = math.hypot(landmarks[159].x - landmarks[145].x, landmarks[159].y - landmarks[145].y)
+                    metrics.append(dist)
+                elif action == "right_eye_blink":
+                    dist = math.hypot(landmarks[386].x - landmarks[374].x, landmarks[386].y - landmarks[374].y)
+                    metrics.append(dist)
+
+            # Εξαγωγή του Ορίου βάσει των ικανοτήτων του χρήστη
+            if metrics:
+                if action in ["mouth_open", "smile"]:
+                    # Θέλουμε τη ΜΕΓΙΣΤΗ απόσταση που πέτυχε ο χρήστης
+                    max_dist = max(metrics)
+                    # Το όριο ενεργοποίησης θα είναι το 70% της μέγιστης προσπάθειάς του 
+                    # (για να μην κουράζεται να το φτάνει στο 100% κάθε φορά)
+                    personal_threshold = max_dist * 0.70 
+                else:
+                    # Για τα μάτια, θέλουμε την ΕΛΑΧΙΣΤΗ απόσταση (πλήρες κλείσιμο)
+                    min_dist = min(metrics)
+                    # Το όριο ενεργοποίησης θα είναι λίγο πάνω από το ελάχιστο, 
+                    # ώστε να "πιάνει" το κλείσιμο ακόμα κι αν δεν σφίξει τα βλέφαρα.
+                    personal_threshold = min_dist * 1.50
+        # ---------------------------------------------------------------------
+
+        try:
+            # 2. Αποθήκευση του ΠΡΟΣΩΠΙΚΟΥ πλέον ορίου στη βάση
+            self.db.save_mapping(self.profile_id, action, key, personal_threshold)
+            print(f"ΕΠΙΤΥΧΙΑ: Καταχωρήθηκε {action} -> {key} (Personal Threshold: {personal_threshold:.4f})")
+            
+            if hasattr(self.parent, 'refresh_active_mappings'):
+                self.parent.refresh_active_mappings()
+                
+            self.on_close()
+            
+        except Exception as e:
+            print(f"❌ ΣΦΑΛΜΑ κατά την αποθήκευση: {e}")
+            self.info_label.configure(text="Σφάλμα! Δείτε το τερματικό.", text_color="red")
 
     def on_close(self):
         """Κλείνει το παράθυρο με ασφάλεια."""
@@ -350,11 +395,14 @@ class MappingsWindow(ctk.CTkToplevel):
 
 class SmartControllerApp(ctk.CTk):
     def refresh_active_mappings(self):
-        """Διαβάζει τα mappings από τη βάση και τα αποθηκεύει στη μνήμη για μηδενικό latency."""
+        """Διαβάζει τα mappings από τη βάση και τα αποθηκεύει στη μνήμη."""
         mappings = self.db.get_mappings(self.current_profile_id)
         self.active_mappings.clear()
-        for m_id, action, key in mappings:
-            self.active_mappings[action] = key
+        
+        for m_id, action, key, threshold in mappings:
+            # Αποθηκεύουμε το πλήκτρο ΚΑΙ το όριο ευαισθησίας για κάθε κίνηση
+            self.active_mappings[action] = {"key": key, "threshold": threshold}
+            
         print(f"Ενεργά Mappings ανανεώθηκαν: {self.active_mappings}")
     def __init__(self):
         # --- Μεταβλητές Ελέγχου PyDirectInput ---
@@ -427,8 +475,11 @@ class SmartControllerApp(ctk.CTk):
 
         # Προφίλ (Αυξάνουμε το μέγεθος και στα tabs)
         ctk.CTkLabel(self.sidebar, text="Επιλογή Προφίλ:", font=large_font).pack(pady=(10, 5))
+        
         self.profile_selector = ctk.CTkSegmentedButton(self.sidebar, values=["1", "2", "3", "4", "5"], 
-                                                       font=large_font, height=45)
+                                                       font=large_font, height=45,
+                                                       command=self.change_profile) # <--- ΕΔΩ ΜΠΗΚΕ Η ΣΥΝΔΕΣΗ
+                                                       
         self.profile_selector.set("1")
         # Το fill="x" τα κάνει να πιάνουν όλο το διαθέσιμο οριζόντιο χώρο
         self.profile_selector.pack(pady=10, padx=20, fill="x")
@@ -480,8 +531,15 @@ class SmartControllerApp(ctk.CTk):
             self.btn_toggle_mouse.configure(text="Ενεργοποίηση Ποντικιού", fg_color="#b22222", hover_color="#8b0000")
 
     def change_profile(self, value):
+        """Ενημερώνει το ενεργό προφίλ όταν ο χρήστης αλλάζει tab."""
+        # 1. Ενημέρωση της κεντρικής μεταβλητής (το value έρχεται ως string, π.χ. "2")
         self.current_profile_id = int(value)
-        self.load_profile_data(self.current_profile_id)
+        
+        print(f"--- Αλλαγή σε Προφίλ {self.current_profile_id} ---")
+        
+        # 2. Φόρτωση των ρυθμίσεων (αν έχεις αποθηκεύσει το sensitivity στη βάση)
+        # 3. Ανανέωση των mappings στη μνήμη ώστε να πιάνει αμέσως τις σωστές κινήσεις
+        self.refresh_active_mappings()
 
     def load_profile_data(self, profile_id):
         profiles = self.db.get_all_profiles()
@@ -577,12 +635,45 @@ class SmartControllerApp(ctk.CTk):
                             self.last_cursor_y = current_y
 
                         # ---------------------------------------------------------
-                        # Δ. Έλεγχος Κινήσεων Προσώπου (Ο ΝΕΟΣ ΚΩΔΙΚΑΣ ΜΠΑΙΝΕΙ ΕΔΩ)
+                        # Δ. Έλεγχος Κινήσεων Προσώπου (Gestures to Keys)
                         # ---------------------------------------------------------
-                        sensitivity = self.sens_slider.get()
-                        
-                        # 1. MOUTH OPEN (Σημεία: 13 άνω χείλος, 14 κάτω χείλος)
-                        if "mouth_open" in self.active_mappings:
+                        if face_landmarks:
+                            landmarks = face_landmarks.landmark
+                            
+                            # 1. Υπολογισμός αποστάσεων (Ευκλείδεια απόσταση) για βασικά σημεία
+                            current_metrics = {
+                                "mouth_open": math.hypot(landmarks[13].x - landmarks[14].x, landmarks[13].y - landmarks[14].y),
+                                "smile": math.hypot(landmarks[61].x - landmarks[291].x, landmarks[61].y - landmarks[291].y),
+                                "left_eye_blink": math.hypot(landmarks[159].x - landmarks[145].x, landmarks[159].y - landmarks[145].y),
+                                "right_eye_blink": math.hypot(landmarks[386].x - landmarks[374].x, landmarks[386].y - landmarks[374].y)
+                            }
+
+                            # 2. Έλεγχος καταχωρημένων κινήσεων για το ενεργό προφίλ
+                            for action, data in self.active_mappings.items():
+                                target_key = data["key"]
+                                threshold = data["threshold"]
+                                
+                                is_active = False
+                                
+                                # Λογική ενεργοποίησης ανάλογα με τον τύπο της κίνησης
+                                if action in ["mouth_open", "smile"]:
+                                    # Ενεργοποίηση όταν η απόσταση ΜΕΓΑΛΩΝΕΙ (ξεπερνά το όριο)
+                                    is_active = current_metrics[action] > threshold
+                                elif action in ["left_eye_blink", "right_eye_blink"]:
+                                    # Ενεργοποίηση όταν η απόσταση ΜΙΚΡΑΙΝΕΙ (πέφτει κάτω από το όριο)
+                                    is_active = current_metrics[action] < threshold
+
+                                # 3. Εντολές στο PyDirectInput (Μόνο 1 φορά ανά πάτημα/άφημα)
+                                if is_active:
+                                    if target_key not in self.pressed_keys:
+                                        pydirectinput.keyDown(target_key)
+                                        self.pressed_keys.add(target_key)
+                                        print(f"🟢 [ΕΝΕΡΓΟ] {action} -> Πατήθηκε: {target_key.upper()}")
+                                else:
+                                    if target_key in self.pressed_keys:
+                                        pydirectinput.keyUp(target_key)
+                                        self.pressed_keys.remove(target_key)
+                                        print(f"🔴 [ΑΝΕΝΕΡΓΟ] {action} -> Απελευθερώθηκε: {target_key.upper()}")
                             target_key = self.active_mappings["mouth_open"]
                             upper_lip = face_landmarks.landmark[13]
                             lower_lip = face_landmarks.landmark[14]
