@@ -126,6 +126,23 @@ class DBManager:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM mappings WHERE profile_id = ?", (profile_id,))
             conn.commit()
+    
+    def get_mappings(self, profile_id):
+        """Επιστρέφει όλες τις κινήσεις του προφίλ: (id, action, mapped_key, threshold)."""
+        self.cursor.execute("SELECT id, action, mapped_key, threshold FROM mappings WHERE profile_id = ?", (profile_id,))
+        return self.cursor.fetchall()
+
+    def update_mapping(self, mapping_id, new_key, new_threshold):
+        """Ενημερώνει το πλήκτρο και την ευαισθησία μιας συγκεκριμένης κίνησης."""
+        query = "UPDATE mappings SET mapped_key = ?, threshold = ? WHERE id = ?"
+        self.cursor.execute(query, (new_key, new_threshold, mapping_id))
+        self.conn.commit()
+
+    def delete_mapping(self, mapping_id):
+        """Διαγράφει οριστικά την κίνηση από το προφίλ."""
+        query = "DELETE FROM mappings WHERE id = ?"
+        self.cursor.execute(query, (mapping_id,))
+        self.conn.commit()
 
 # --- Παράδειγμα Χρήσης (Τρέχει μόνο αν εκτελέσεις απευθείας αυτό το αρχείο) ---
 if __name__ == "__main__":

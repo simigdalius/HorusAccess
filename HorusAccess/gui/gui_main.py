@@ -1,11 +1,6 @@
 import customtkinter as ctk
 import cv2
 import mediapipe as mp
-# Προσθήκη των συγκεκριμένων modules για να μην ψάχνει το 'solutions' μετά
-from mediapipe.python.solutions import face_mesh as face_mesh_lib
-from mediapipe.python.solutions import drawing_utils as drawing_utils_lib
-from mediapipe.python.solutions import drawing_styles as drawing_styles_lib
-
 from PIL import Image
 import pydirectinput
 import time
@@ -15,11 +10,149 @@ import sys
 from database.db_manager import DBManager
 
 
-from database.db_manager import DBManager
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Απενεργοποίηση του FailSafe για να μην κρασάρει αν το ποντίκι πάει στις γωνίες
 pydirectinput.FAILSAFE = False
+
+class ProfileReviewWindow(ctk.CTkToplevel):
+    def __init__(self, parent, current_profile_id, db):
+        super().__init__(parent)
+        self.parent = parent
+        self.profile_id = current_profile_id
+        self.db = db
+
+        self.title(f"Εμφάνιση & Επεξεργασία Καταχωρημένων (Προφίλ {self.profile_id})")
+        self.geometry("750x550")
+        self.attributes("-topmost", True)
+
+        # Αποθήκευση αναφορών στα widgets (για να μπορούμε να τα διαβάσουμε/κλειδώσουμε)
+        self.row_widgets = {} 
+        self.is_locked = False
+
+        self._build_ui()
+        self.load_data()
+
+    def _build_ui(self):
+        # Τίτλος
+        ctk.CTkLabel(self, text="Διαχείριση Κινήσεων", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=20)
+
+        # Scrollable Frame για τη λίστα
+        self.scroll_frame = ctk.CTkScrollableFrame(self, width=650, height=350)
+        self.scroll_frame.pack(pady=10, padx=20, fill="both", expand=True)
+
+        # Κουμπί Αποθήκευσης & Κλειδώματος
+        self.btn_lock = ctk.CTkButton(self, text="Αποθήκευση & Κλείδωμα", 
+                                      font=ctk.CTkFont(size=18, weight="bold"), 
+                                      height=50, fg_color="#27ae60", hover_color="#2ecc71",
+                                      command=self.save_and_lock)
+        self.btn_lock.pack(pady=20)
+
+    def load_data(self):
+        # Καθαρισμός του frame σε περίπτωση ανανέωσης
+        for widget in self.scroll_frame.winfo_children():
+            widget.destroy()
+        self.row_widgets.clear()
+
+        mappings = self.db.get_mappings(self.profile_id)
+        
+        if not mappings:
+            ctk.CTkLabel(self.scroll_frame, text="Δεν βρέθηκαν καταχωρημένες κινήσεις.", font=ctk.CTkFont(size=16)).pack(pady=40)
+            return
+
+        # Δημιουργία γραμμής (Row) για κάθε καταχωρημένη κίνηση
+        for m_id, action, key, threshold in mappings:
+            row_frame = ctk.CTkFrame(self.scroll_frame, corner_radius=8)
+            row_frame.pack(fill="x", pady=5, padx=5, ipady=5)
+
+            # Όνομα Κίνησης
+            ctk.CTkLabel(row_frame, text=f"🎯 {action}", font=ctk.CTkFont(size=16, weight="bold"), width=150, anchor="w").pack(side="left", padx=10)
+
+            # Dropdown Πλήκτρου
+            ctk.CTkLabel(row_frame, text="Πλήκτρο:").pack(side="left", padx=(10, 2))
+            key_var = ctk.StringVar(value=key)
+            key_dropdown = ctk.CTkOptionMenu(row_frame, values=["space", "enter", "w", "a", "s", "d", "up", "down", "left_click", "right_click"], variable=key_var, width=100, state="disabled")
+            key_dropdown.pack(side="left", padx=5)
+
+            # Entry Ευαισθησίας
+            ctk.CTkLabel(row_frame, text="Όριο (Thresh):").pack(side="left", padx=(15, 2))
+            thresh_entry = ctk.CTkEntry(row_frame, width=60, state="disabled")
+            thresh_entry.insert(0, str(threshold))
+            thresh_entry.pack(side="left", padx=5)
+
+            # Κουμπιά Action
+            btn_edit = ctk.CTkButton(row_frame, text="Επεξεργασία", width=80, fg_color="#f39c12", hover_color="#e67e22",
+                                     command=lambda mid=m_id: self.enable_edit(mid))
+            btn_edit.pack(side="right", padx=10)
+
+            btn_delete = ctk.CTkButton(row_frame, text="Διαγραφή", width=80, fg_color="#c0392b", hover_color="#e74c3c",
+                                       command=lambda mid=m_id: self.delete_entry(mid))
+            btn_delete.pack(side="right", padx=5)
+
+            # Αποθήκευση των στοιχείων για να τα ελέγχουμε αργότερα
+            self.row_widgets[m_id] = {
+                "key_dropdown": key_dropdown,
+                "thresh_entry": thresh_entry,
+                "btn_edit": btn_edit,
+                "btn_delete": btn_delete
+            }
+
+    def enable_edit(self, mapping_id):
+        """Ξεκλειδώνει τα πεδία μιας συγκεκριμένης γραμμής."""
+        if self.is_locked:
+            return # Αν είναι συνολικά κλειδωμένο, αγνοούμε το πάτημα
+            
+        widgets = self.row_widgets[mapping_id]
+        widgets["key_dropdown"].configure(state="normal")
+        widgets["thresh_entry"].configure(state="normal")
+        widgets["btn_edit"].configure(text="Ενεργό", fg_color="gray", state="disabled")
+
+    def delete_entry(self, mapping_id):
+        """Διαγράφει την κίνηση και ανανεώνει τη λίστα."""
+        if self.is_locked:
+            return
+
+        self.db.delete_mapping(mapping_id)
+        print(f"Διαγράφηκε η κίνηση με ID {mapping_id}")
+        self.load_data() # Ανανέωση UI
+        self.parent.refresh_active_mappings() # Ενημέρωση μνήμης στο background
+
+    def save_and_lock(self):
+        """Αποθηκεύει τις αλλαγές, κλειδώνει το UI και ετοιμάζει το σύστημα για gaming."""
+        if self.is_locked:
+            # Λειτουργία 'Ξεκλείδωμα'
+            self.is_locked = False
+            self.btn_lock.configure(text="Αποθήκευση & Κλείδωμα", fg_color="#27ae60", hover_color="#2ecc71")
+            
+            # Επαναφέρουμε τα Edit/Delete κουμπιά
+            for w in self.row_widgets.values():
+                w["btn_edit"].configure(state="normal", text="Επεξεργασία", fg_color="#f39c12")
+                w["btn_delete"].configure(state="normal")
+            return
+
+        # Λειτουργία 'Αποθήκευση & Κλείδωμα'
+        for m_id, widgets in self.row_widgets.items():
+            new_key = widgets["key_dropdown"].get()
+            try:
+                new_thresh = float(widgets["thresh_entry"].get())
+            except ValueError:
+                new_thresh = 0.05 # Fallback αν ο χρήστης βάλει γράμματα αντί για αριθμούς
+
+            # Ενημέρωση Βάσης
+            self.db.update_mapping(m_id, new_key, new_thresh)
+            
+            # Κλείδωμα των widgets
+            widgets["key_dropdown"].configure(state="disabled")
+            widgets["thresh_entry"].configure(state="disabled")
+            widgets["btn_edit"].configure(state="disabled")
+            widgets["btn_delete"].configure(state="disabled")
+
+        self.is_locked = True
+        self.btn_lock.configure(text="🔒 ΚΛΕΙΔΩΜΕΝΟ (Πατήστε για ξεκλείδωμα)", fg_color="#c0392b", hover_color="#e74c3c")
+        
+        # Ενημέρωση της κεντρικής εφαρμογής με τα νέα δεδομένα
+        self.parent.refresh_active_mappings()
+        print("Το προφίλ αποθηκεύτηκε και κλειδώθηκε.")
 
 class MotionRegistrationWindow(ctk.CTkToplevel):
     def __init__(self, parent, current_profile_id, db):
@@ -30,44 +163,57 @@ class MotionRegistrationWindow(ctk.CTkToplevel):
 
         # Ρυθμίσεις παραθύρου
         self.title("Εισαγωγή Κίνησης")
-        self.geometry("450x350")
-        self.attributes("-topmost", True) # Κρατάει το popup πάντα μπροστά
+        self.geometry("500x550")
+        self.attributes("-topmost", True)
         self.resizable(False, False)
 
-        # --- UI Στοιχεία ---
-        self.info_label = ctk.CTkLabel(self, text="Ετοιμαστείτε...", font=ctk.CTkFont(size=22, weight="bold"))
-        self.info_label.pack(pady=40)
+        # Μεταβλητές αναπαραγωγής
+        self.playback_frames = []
+        self.playback_index = 0
+        self.is_playing = False
 
-        # Frame για τα κουμπιά Έγκρισης (Αρχικά κρυμμένο)
+        # --- UI Στοιχεία ---
+        # 1. Περιοχή αναπαραγωγής βίντεο
+        self.video_label = ctk.CTkLabel(self, text="", width=320, height=240, fg_color="gray20")
+        self.video_label.pack(pady=20)
+
+        # 2. Κείμενο Πληροφοριών / Αντίστροφης μέτρησης
+        self.info_label = ctk.CTkLabel(self, text="Ετοιμαστείτε...", font=ctk.CTkFont(size=22, weight="bold"))
+        self.info_label.pack(pady=10)
+
+        # 3. Frame για τα κουμπιά Έγκρισης (Αρχικά κρυμμένο)
         self.approval_frame = ctk.CTkFrame(self, fg_color="transparent")
         
-        self.btn_yes = ctk.CTkButton(self.approval_frame, text="Ναι", fg_color="green", hover_color="#006400", command=self.approve_motion)
+        self.btn_yes = ctk.CTkButton(self.approval_frame, text="Ναι (Έγκριση)", fg_color="green", hover_color="#006400", command=self.approve_motion)
         self.btn_yes.grid(row=0, column=0, padx=10)
         
-        self.btn_no = ctk.CTkButton(self.approval_frame, text="Ξανά Καταγραφή", fg_color="#b22222", hover_color="#8b0000", command=self.start_countdown)
+        self.btn_no = ctk.CTkButton(self.approval_frame, text="Ξανά Καταγραφή", fg_color="#b22222", hover_color="#8b0000", command=self.retry_recording)
         self.btn_no.grid(row=0, column=1, padx=10)
 
-        # Frame για την Αντιστοίχιση Πλήκτρου (Αρχικά κρυμμένο)
+        # 4. Frame για την Αντιστοίχιση Πλήκτρου (Αρχικά κρυμμένο)
         self.mapping_frame = ctk.CTkFrame(self, fg_color="transparent")
 
-        # Λίστα με τις πιθανές κινήσεις που θέλουμε να αναγνωρίζουμε
         ctk.CTkLabel(self.mapping_frame, text="Όνομα Κίνησης:").grid(row=0, column=0, padx=10, pady=10, sticky="e")
         self.action_dropdown = ctk.CTkOptionMenu(self.mapping_frame, values=["mouth_open", "left_eye_blink", "right_eye_blink", "eyebrows_up", "smile"])
         self.action_dropdown.grid(row=0, column=1, padx=10, pady=10)
 
-        # Λίστα με τα διαθέσιμα πλήκτρα
         ctk.CTkLabel(self.mapping_frame, text="Πλήκτρο:").grid(row=1, column=0, padx=10, pady=10, sticky="e")
-        self.key_dropdown = ctk.CTkOptionMenu(self.mapping_frame, values=["space", "enter", "w", "a", "s", "d", "left_click", "right_click"])
+        self.key_dropdown = ctk.CTkOptionMenu(self.mapping_frame, values=["space", "enter", "w", "a", "s", "d", "up", "down", "left_click", "right_click"])
         self.key_dropdown.grid(row=1, column=1, padx=10, pady=10)
 
-        self.btn_save = ctk.CTkButton(self.mapping_frame, text="Αποθήκευση στο Προφίλ", command=self.save_to_db)
+        self.btn_save = ctk.CTkButton(self.mapping_frame, text="Αποθήκευση & Κλείσιμο", command=self.save_to_db)
         self.btn_save.grid(row=2, column=0, columnspan=2, pady=20)
 
-        # Ξεκινάμε την αντίστροφη μέτρηση αυτόματα μόλις ανοίξει το παράθυρο
+        # Αποτροπή σφαλμάτων αν κλείσει το παράθυρο νωρίς
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Έναρξη
         self.start_countdown()
 
     def start_countdown(self):
         """Επαναφέρει το UI και ξεκινά την αντίστροφη μέτρηση."""
+        self.is_playing = False
+        self.video_label.configure(image="") # Καθαρισμός οθόνης
         self.approval_frame.pack_forget()
         self.mapping_frame.pack_forget()
         self.countdown(3)
@@ -78,48 +224,146 @@ class MotionRegistrationWindow(ctk.CTkToplevel):
             self.info_label.configure(text=f"{count}...")
             self.after(1000, self.countdown, count - 1)
         else:
-            self.info_label.configure(text="🔴 ΚΑΤΑΓΡΑΦΗ ΔΕΔΟΜΕΝΩΝ...")
-            # Δίνουμε σήμα στο κεντρικό app να ξεκινήσει τη συλλογή MediaPipe landmarks
+            self.info_label.configure(text="🔴 ΚΑΤΑΓΡΑΦΗ (1 δευτερόλεπτο)...")
+            # Σήμα στο main app
+            self.parent.recorded_landmarks.clear()
+            self.parent.recorded_frames.clear()
             self.parent.is_recording_motion = True 
-            self.parent.recorded_landmarks.clear() # Καθαρίζουμε παλιά δεδομένα
             
-            # Περιμένουμε 1 δευτερόλεπτο και σταματάμε
+            # Σταματάμε μετά από 1000ms (1 δευτερόλεπτο)
             self.after(1000, self.finish_recording)
 
     def finish_recording(self):
-        """Ολοκλήρωση του 1 δευτερολέπτου καταγραφής."""
+        """Ολοκλήρωση της καταγραφής και έναρξη του Video Loop."""
         self.parent.is_recording_motion = False
         
-        # Εδώ στη διπλωματική σου θα μπορούσες να πάρεις τα δεδομένα από το self.parent.recorded_landmarks 
-        # για να εκπαιδεύσεις ένα μοντέλο (π.χ. SVM) ή να βρεις τον μέσο όρο των αποστάσεων.
-        print(f"Συλλέχθηκαν δεδομένα από {len(self.parent.recorded_landmarks)} frames.")
+        # Αντιγραφή των frames από το κεντρικό app στο τοπικό buffer
+        self.playback_frames = self.parent.recorded_frames.copy()
+        
+        if not self.playback_frames:
+            self.info_label.configure(text="Σφάλμα: Δεν καταγράφηκαν frames.")
+            self.approval_frame.pack(pady=10)
+            return
 
         self.info_label.configure(text="Έγκριση κίνησης;")
-        self.approval_frame.pack(pady=20)
+        self.approval_frame.pack(pady=10)
+
+        # Ξεκινάμε την λούπα
+        self.is_playing = True
+        self.playback_index = 0
+        self.play_video_loop()
+
+    def play_video_loop(self):
+        """Διαβάζει τα frames από τη μνήμη και τα παίζει σε λούπα (~30 FPS)."""
+        if not self.is_playing or not self.playback_frames:
+            return
+
+        # Φόρτωση του τρέχοντος frame
+        frame = self.playback_frames[self.playback_index]
+        img = Image.fromarray(frame)
+        
+        # Αλλαγή μεγέθους για να χωράει όμορφα στο popup
+        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(320, 240))
+        self.video_label.configure(image=ctk_img)
+        self.video_label.image = ctk_img # Αποφυγή garbage collection
+
+        # Αύξηση του index και μηδενισμός αν φτάσει στο τέλος (Loop Effect)
+        self.playback_index = (self.playback_index + 1) % len(self.playback_frames)
+        
+        # Κλήση του εαυτού της σε ~33ms (δηλαδή 30 φορές το δευτερόλεπτο)
+        self.after(33, self.play_video_loop)
+
+    def retry_recording(self):
+        """Ο χρήστης πάτησε 'Ξανά Καταγραφή'."""
+        self.start_countdown()
 
     def approve_motion(self):
-        """Ο χρήστης πάτησε [Ναι]. Εμφάνιση του μενού αντιστοίχισης."""
+        """Ο χρήστης πάτησε [Ναι]. Σταματάει το loop και ζητάει πλήκτρο."""
+        self.is_playing = False # Σταματάει το βίντεο για να μην τρώει πόρους
         self.approval_frame.pack_forget()
         self.info_label.configure(text="Αντιστοίχιση σε Πλήκτρο:")
         self.mapping_frame.pack(pady=10)
 
     def save_to_db(self):
-        """Αποθήκευση στη βάση SQLite μέσω του db_manager."""
+        """Αποθήκευση στη βάση."""
         action = self.action_dropdown.get()
         key = self.key_dropdown.get()
         
-        # Αποθήκευση με χρήση της υπάρχουσας μεθόδου του db_manager
         self.db.save_mapping(self.profile_id, action, key)
-        print(f"Επιτυχής αποθήκευση: Προφίλ {self.profile_id} | {action} -> {key}")
+        print(f"Αποθηκεύτηκε: {action} -> {key} στο Προφίλ {self.profile_id}")
         
-        # Κλείσιμο του popup
+        # Ανανέωση της μνήμης του κεντρικού app (για μηδενικό latency)
+        if hasattr(self.parent, 'refresh_active_mappings'):
+            self.parent.refresh_active_mappings()
+            
+        self.on_close()
+
+    def on_close(self):
+        """Κλείνει το παράθυρο με ασφάλεια."""
+        self.is_playing = False
         self.destroy()
 
+class MappingsWindow(ctk.CTkToplevel):
+    def __init__(self, parent, profile_id, db):
+        super().__init__(parent)
+        self.title(f"Καταχωρημένες Κινήσεις - Προφίλ {profile_id}")
+        self.geometry("400x400")
+        self.attributes("-topmost", True)
+        self.db = db
+        self.profile_id = profile_id
+        self.parent = parent
+
+        ctk.CTkLabel(self, text="Ενεργές Αντιστοιχίσεις", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=20)
+
+        self.scroll_frame = ctk.CTkScrollableFrame(self)
+        self.scroll_frame.pack(expand=True, fill="both", padx=20, pady=10)
+
+        self.load_mappings()
+
+    def load_mappings(self):
+        # Καθαρισμός του frame
+        for widget in self.scroll_frame.winfo_children():
+            widget.destroy()
+
+        # Υποθετική μέθοδος db: get_mappings(profile_id) -> list of tuples (id, action, key)
+        mappings = self.db.get_mappings(self.profile_id)
+        
+        if not mappings:
+            ctk.CTkLabel(self.scroll_frame, text="Δεν υπάρχουν καταχωρημένες κινήσεις.").pack(pady=20)
+            return
+
+        for m_id, action, key in mappings:
+            row_frame = ctk.CTkFrame(self.scroll_frame)
+            row_frame.pack(fill="x", pady=5)
+            
+            lbl = ctk.CTkLabel(row_frame, text=f"👉 {action}  ->  [{key.upper()}]", font=ctk.CTkFont(size=14))
+            lbl.pack(side="left", padx=10, pady=10)
+            
+            btn_delete = ctk.CTkButton(row_frame, text="Διαγραφή", width=60, fg_color="#b22222", 
+                                       command=lambda i=m_id: self.delete_mapping(i))
+            btn_delete.pack(side="right", padx=10)
+
+    def delete_mapping(self, mapping_id):
+        self.db.delete_mapping(mapping_id)
+        self.load_mappings()
+        self.parent.refresh_active_mappings() # Ανανέωση στο κεντρικό loop
+
 class SmartControllerApp(ctk.CTk):
+    def refresh_active_mappings(self):
+        """Διαβάζει τα mappings από τη βάση και τα αποθηκεύει στη μνήμη για μηδενικό latency."""
+        mappings = self.db.get_mappings(self.current_profile_id)
+        self.active_mappings.clear()
+        for m_id, action, key in mappings:
+            self.active_mappings[action] = key
+        print(f"Ενεργά Mappings ανανεώθηκαν: {self.active_mappings}")
     def __init__(self):
+        # --- Μεταβλητές Ελέγχου PyDirectInput ---
+        self.active_mappings = {}  # π.χ. {"mouth_open": "space"}
+        self.pressed_keys = set()  # Κρατάει τα πλήκτρα που είναι "πατημένα" (held down)
         # --- Μεταβλητές Καταγραφής Κίνησης ---
         self.is_recording_motion = False
         self.recorded_landmarks = []
+        self.recorded_frames = [] # [ΝΕΟ] Εδώ θα αποθηκεύονται οι εικόνες (raw frames)
         super().__init__()
 
         self.title("Smart Controller - Σχεδίαση & Υλοποίηση")
@@ -130,17 +374,16 @@ class SmartControllerApp(ctk.CTk):
         self.db = DBManager()
         self.current_profile_id = 1
         
-        # --- MediaPipe Setup (Εναλλακτικός τρόπος φόρτωσης) ---
-
-        self.mp_face_mesh = face_mesh_lib
+        # --- MediaPipe Setup ---
+        self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
             max_num_faces=1,
             refine_landmarks=True, 
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
-        self.mp_drawing = drawing_utils_lib
-        self.mp_drawing_styles = drawing_styles_lib
+        self.mp_drawing = mp.solutions.drawing_utils
+        self.mp_drawing_styles = mp.solutions.drawing_styles
 
         # --- Παράμετροι Ποντικιού & Dwell Clicking ---
         self.screen_w, self.screen_h = pydirectinput.size()
@@ -167,47 +410,66 @@ class SmartControllerApp(ctk.CTk):
         self.update_video()
 
     def _build_ui(self):
-
-        # Κουμπί για νέα κίνηση
-        self.btn_add_motion = ctk.CTkButton(self.sidebar, text="Εισαγωγή Κίνησης", 
-                                            fg_color="#1f538d", 
-                                            command=self.add_motion_event)
-        self.btn_add_motion.pack(pady=10, padx=20)
-        """Κατασκευάζει το User Interface."""
+        """Κατασκευάζει το User Interface με μεγάλα στοιχεία για Accessibility."""
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
+        # 1. Κοινές, μεγάλες γραμματοσειρές για εύκολη ανάγνωση
+        large_font = ctk.CTkFont(family="Arial", size=18, weight="bold")
+        title_font = ctk.CTkFont(family="Arial", size=24, weight="bold")
+
         # -- Sidebar --
-        self.sidebar = ctk.CTkFrame(self, width=250, corner_radius=0)
+        # 2. Αυξάνουμε το πλάτος του sidebar (από 250 σε 320) για να χωράνε άνετα τα μεγάλα κουμπιά
+        self.sidebar = ctk.CTkFrame(self, width=320, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         
-        ctk.CTkLabel(self.sidebar, text="Smart Controller", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=20)
+        ctk.CTkLabel(self.sidebar, text="Smart Controller", font=title_font).pack(pady=30)
 
-        # Προφίλ
-        self.profile_selector = ctk.CTkSegmentedButton(self.sidebar, values=["1", "2", "3", "4", "5"], command=self.change_profile)
+        # Προφίλ (Αυξάνουμε το μέγεθος και στα tabs)
+        ctk.CTkLabel(self.sidebar, text="Επιλογή Προφίλ:", font=large_font).pack(pady=(10, 5))
+        self.profile_selector = ctk.CTkSegmentedButton(self.sidebar, values=["1", "2", "3", "4", "5"], 
+                                                       font=large_font, height=45)
         self.profile_selector.set("1")
-        self.profile_selector.pack(pady=10, padx=10)
+        # Το fill="x" τα κάνει να πιάνουν όλο το διαθέσιμο οριζόντιο χώρο
+        self.profile_selector.pack(pady=10, padx=20, fill="x")
 
         # Ευαισθησία
-        ctk.CTkLabel(self.sidebar, text="Ευαισθησία (Sensitivity):").pack(pady=(20, 0))
-        self.sens_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=3.0, number_of_steps=29, command=self.update_sens_label)
+        ctk.CTkLabel(self.sidebar, text="Ευαισθησία:", font=large_font).pack(pady=(30, 5))
+        # 3. Πιο παχύς slider με μεγαλύτερη "μπίλια" (button_length) για πιο εύκολη στόχευση
+        self.sens_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=3.0, number_of_steps=29, 
+                                         command=self.update_sens_label, 
+                                         height=25, button_length=25) 
         self.sens_slider.set(1.0)
-        self.sens_slider.pack(pady=10, padx=10)
-        self.sens_value_label = ctk.CTkLabel(self.sidebar, text="1.0")
+        self.sens_slider.pack(pady=10, padx=20, fill="x")
+        self.sens_value_label = ctk.CTkLabel(self.sidebar, text="1.0", font=large_font)
         self.sens_value_label.pack()
 
-        # Κουμπί Ενεργοποίησης Ποντικιού (CRITICAL για testing)
+        # 4. Κουμπί Ενεργοποίησης Ποντικιού (ΤΕΡΑΣΤΙΟ: height=70)
         self.btn_toggle_mouse = ctk.CTkButton(self.sidebar, text="Ενεργοποίηση Ποντικιού", 
+                                              font=large_font, height=70, corner_radius=10,
                                               fg_color="#b22222", hover_color="#8b0000",
                                               command=self.toggle_mouse_control)
-        self.btn_toggle_mouse.pack(pady=20, padx=20)
+        self.btn_toggle_mouse.pack(pady=40, padx=20, fill="x")
+
+        # 5. Κουμπί Εισαγωγής Κίνησης (ΤΕΡΑΣΤΙΟ: height=70)
+        self.btn_add_motion = ctk.CTkButton(self.sidebar, text="Εισαγωγή Κίνησης", 
+                                            font=large_font, height=70, corner_radius=10,
+                                            fg_color="#1f538d", 
+                                            command=self.add_motion_event)
+        self.btn_add_motion.pack(pady=10, padx=20, fill="x")
+
+        # Κουμπί Εμφάνισης Καταχωρημένων
+        self.btn_review = ctk.CTkButton(self.sidebar, text="Εμφάνιση Καταχωρημένων", 
+                                        font=large_font, height=50, corner_radius=10,
+                                        fg_color="#8e44ad", hover_color="#732d91",
+                                        command=self.open_review_window)
+        self.btn_review.pack(pady=10, padx=20, fill="x")
 
         # --- Video Area ---
         self.video_frame = ctk.CTkFrame(self, corner_radius=10)
         self.video_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
         self.video_label = ctk.CTkLabel(self.video_frame, text="")
         self.video_label.pack(expand=True, fill="both", padx=10, pady=10)
-
     # --- Βασικές Λειτουργίες ---
     def toggle_mouse_control(self):
         self.mouse_control_active = not self.mouse_control_active
@@ -247,10 +509,13 @@ class SmartControllerApp(ctk.CTk):
             if results.multi_face_landmarks:
                 for face_landmarks in results.multi_face_landmarks:
                     
-                    # [ΝΕΟ] Αν η αντίστροφη μέτρηση τελείωσε και είμαστε στο 1 δευτερόλεπτο καταγραφής:
+                    # [ΝΕΟ] Αν η αντίστροφη μέτρηση τελείωσε και καταγράφουμε:
                     if self.is_recording_motion:
-                        # Αποθηκεύουμε τα raw δεδομένα του frame σε μια λίστα
                         self.recorded_landmarks.append(face_landmarks)
+                        # Κρατάμε ένα καθαρό αντίγραφο του RGB frame πριν ζωγραφιστεί το πλέγμα (προαιρετικά)
+                        # ή μετά, ανάλογα αν θες να βλέπει το mesh στο loop. 
+                        # Εδώ το αποθηκεύουμε όπως είναι εκείνη τη στιγμή.
+                        self.recorded_frames.append(rgb_frame.copy())
 
                     # Α. Σχεδίαση του Mesh στο πρόσωπο
                     self.mp_drawing.draw_landmarks(
@@ -283,7 +548,7 @@ class SmartControllerApp(ctk.CTk):
 
                     current_x, current_y = int(self.smooth_x), int(self.smooth_y)
 
-                    # Γ. Έλεγχος Ποντικιού και Dwell Clicking
+                    # Γ. Έλεγχος Ποντικιού και Dwell Clicking (Ο ΚΩΔΙΚΑΣ ΠΟΥ ΕΧΕΙΣ ΗΔΗ)
                     if self.mouse_control_active:
                         pydirectinput.moveTo(current_x, current_y)
 
@@ -311,6 +576,35 @@ class SmartControllerApp(ctk.CTk):
                             self.last_cursor_x = current_x
                             self.last_cursor_y = current_y
 
+                        # ---------------------------------------------------------
+                        # Δ. Έλεγχος Κινήσεων Προσώπου (Ο ΝΕΟΣ ΚΩΔΙΚΑΣ ΜΠΑΙΝΕΙ ΕΔΩ)
+                        # ---------------------------------------------------------
+                        sensitivity = self.sens_slider.get()
+                        
+                        # 1. MOUTH OPEN (Σημεία: 13 άνω χείλος, 14 κάτω χείλος)
+                        if "mouth_open" in self.active_mappings:
+                            target_key = self.active_mappings["mouth_open"]
+                            upper_lip = face_landmarks.landmark[13]
+                            lower_lip = face_landmarks.landmark[14]
+                            
+                            # Υπολογισμός απόστασης (κανονικοποιημένη)
+                            mouth_dist = math.hypot(upper_lip.x - lower_lip.x, upper_lip.y - lower_lip.y)
+                            
+                            # Βασικό όριο (threshold) που επηρεάζεται από το sensitivity
+                            base_threshold = 0.05 
+                            adjusted_threshold = base_threshold / sensitivity
+                            
+                            if mouth_dist > adjusted_threshold:
+                                if target_key not in self.pressed_keys:
+                                    pydirectinput.keyDown(target_key)
+                                    self.pressed_keys.add(target_key)
+                                    print(f"Action: {target_key} (DOWN)")
+                            else:
+                                if target_key in self.pressed_keys:
+                                    pydirectinput.keyUp(target_key)
+                                    self.pressed_keys.remove(target_key)
+                                    print(f"Action: {target_key} (UP)")
+
             # 3. Μετατροπή και Εμφάνιση στο GUI
             img = Image.fromarray(rgb_frame)
             ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(640, 480))
@@ -323,6 +617,10 @@ class SmartControllerApp(ctk.CTk):
         # Δημιουργία και εμφάνιση του Popup παραθύρου
         popup = MotionRegistrationWindow(self, self.current_profile_id, self.db)
         popup.grab_set() # "Κλειδώνει" την εστίαση στο popup μέχρι να κλείσει
+
+    def open_review_window(self):
+        review_popup = ProfileReviewWindow(self, self.current_profile_id, self.db)
+        review_popup.grab_set()
 
     def on_closing(self):
         self.cap.release()
