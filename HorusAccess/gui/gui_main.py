@@ -7,6 +7,7 @@ import time
 import math
 import os
 import sys
+import pyautogui
 from database.db_manager import DBManager
 
 
@@ -18,6 +19,7 @@ pydirectinput.FAILSAFE = False
 class ProfileReviewWindow(ctk.CTkToplevel):
     def __init__(self, parent, current_profile_id, db):
         super().__init__(parent)
+        
         self.parent = parent
         self.profile_id = current_profile_id
         self.db = db
@@ -435,23 +437,38 @@ class SmartControllerApp(ctk.CTk):
 
         # --- Παράμετροι Ποντικιού & Dwell Clicking ---
         self.screen_w, self.screen_h = pydirectinput.size()
-        self.mouse_control_active = False # Διακόπτης ασφαλείας
         
+        # 1. ΑΛΛΑΓΗ: Το Head Tracking ξεκινάει αυτόματα ενεργό!
+        self.mouse_control_active = True 
+        
+        # 2. ΝΕΟ: Μεταβλητές για το Physical Mouse Override
+        self.mouse_pause_until = 0.0      
+        self.last_injected_pos = None     
+
         # Εξομάλυνση κίνησης (Smoothing)
         self.smooth_x, self.smooth_y = self.screen_w // 2, self.screen_h // 2
         
-        # Μεταβλητές Dwell Click
+        # Μεταβλητές Dwell Click (Οι δικές σου)
         self.dwell_start_time = time.time()
         self.last_cursor_x, self.last_cursor_y = 0, 0
         self.dwell_threshold = 30  # Ανεκτά όρια (pixels) για να θεωρηθεί "ακίνητο" το ποντίκι
         self.dwell_duration = 2.0  # Δευτερόλεπτα
         self.is_dwelling = False
 
-        # --- OpenCV Setup ---
+        # 3. ΝΕΟ: Μεταβλητές για τις κινήσεις (Gestures)
+        self.active_mappings = {}
+        self.pressed_keys = set()
+
+        self._build_ui()
+        self.load_profile_data(1)
+
+        # 4. Μεταβλητή για το κλικ με τα φρύδια
+        self.is_eyebrow_clicked = False
+        
+        # --- OpenCV Setup (ΠΡΕΠΕΙ να μπει πριν το update_video) ---
         self.cap = cv2.VideoCapture(0)
-        # Χρήση αριθμών αντί για σταθερές cv2 για αποφυγή false errors στο VS Code
-        self.cap.set(3, 640) # 3 = cv2.CAP_PROP_FRAME_WIDTH
-        self.cap.set(4, 480) # 4 = cv2.CAP_PROP_FRAME_HEIGHT
+        self.cap.set(3, 640) 
+        self.cap.set(4, 480)
 
         self._build_ui()
         self.load_profile_data(1)
@@ -494,13 +511,6 @@ class SmartControllerApp(ctk.CTk):
         self.sens_slider.pack(pady=10, padx=20, fill="x")
         self.sens_value_label = ctk.CTkLabel(self.sidebar, text="1.0", font=large_font)
         self.sens_value_label.pack()
-
-        # 4. Κουμπί Ενεργοποίησης Ποντικιού (ΤΕΡΑΣΤΙΟ: height=70)
-        self.btn_toggle_mouse = ctk.CTkButton(self.sidebar, text="Ενεργοποίηση Ποντικιού", 
-                                              font=large_font, height=70, corner_radius=10,
-                                              fg_color="#b22222", hover_color="#8b0000",
-                                              command=self.toggle_mouse_control)
-        self.btn_toggle_mouse.pack(pady=40, padx=20, fill="x")
 
         # 5. Κουμπί Εισαγωγής Κίνησης (ΤΕΡΑΣΤΙΟ: height=70)
         self.btn_add_motion = ctk.CTkButton(self.sidebar, text="Εισαγωγή Κίνησης", 
@@ -606,95 +616,112 @@ class SmartControllerApp(ctk.CTk):
 
                     current_x, current_y = int(self.smooth_x), int(self.smooth_y)
 
-                    # Γ. Έλεγχος Ποντικιού και Dwell Clicking (Ο ΚΩΔΙΚΑΣ ΠΟΥ ΕΧΕΙΣ ΗΔΗ)
+                    # ---------------------------------------------------------
+                    # Γ. Έλεγχος Ποντικιού, Dwell Clicking & MOUSE OVERRIDE
+                    # ---------------------------------------------------------
                     if self.mouse_control_active:
-                        pydirectinput.moveTo(current_x, current_y)
-
-                        dist = math.hypot(current_x - self.last_cursor_x, current_y - self.last_cursor_y)
-
-                        if dist < self.dwell_threshold:
-                            elapsed_time = time.time() - self.dwell_start_time
-                            self.is_dwelling = True
+                        import time
+                        current_time = time.time()
+                        
+                        # 1. Υπολογισμός Συντεταγμένων από τη Μύτη (Landmark 4)
+                        screen_w, screen_h = pyautogui.size()
+                        nose = face_landmarks.landmark[4]
+                        
+                        # Το x αφαιρείται από το 1 (1 - x) επειδή η κάμερα λειτουργεί σαν καθρέφτης
+                        current_x = int(nose.x * screen_w)
+                        current_y = int(nose.y * screen_h)
+                        
+                        # 2. Έλεγχος Physical Mouse Override
+                        actual_mouse_x, actual_mouse_y = pyautogui.position()
+                        
+                        if self.last_injected_pos is not None:
+                            dist_moved = math.hypot(actual_mouse_x - self.last_injected_pos[0], actual_mouse_y - self.last_injected_pos[1])
                             
-                            # 0 = cv2.FONT_HERSHEY_SIMPLEX
-                            cv2.putText(rgb_frame, f"Dwell: {elapsed_time:.1f}s", (10, 30), 
-                                        0, 1, (255, 0, 0), 2)
-
-                            if elapsed_time >= self.dwell_duration:
-                                pydirectinput.click()
-                                print("--- Dwell Click Ενεργοποιήθηκε ---")
+                            # Αυξήσαμε την ανοχή στο 25. Αν μετακινηθεί >25 pixels από εξωτερικό ποντίκι, μπαίνει σε παύση
+                            if dist_moved > 25:
+                                self.mouse_pause_until = current_time + 3.0
                                 
-                                # 0 = cv2.FONT_HERSHEY_SIMPLEX
-                                cv2.putText(rgb_frame, "CLICK!", (10, 70), 0, 1.5, (0, 255, 0), 3)
+                        # 3. Εκτέλεση Head Tracking (Αν δεν είμαστε σε παύση)
+                        if current_time >= self.mouse_pause_until:
+                            pydirectinput.moveTo(current_x, current_y)
+                            self.last_injected_pos = (current_x, current_y)
+                            
+                            # ---------------------------------------------------------
+                            # ΝΕΟ: Κλικ με Ανασήκωμα Φρυδιών / Γούρλωμα Ματιών
+                            # ---------------------------------------------------------
+                            landmarks = face_landmarks.landmark
+                            # Υπολογίζουμε την απόσταση μεταξύ φρυδιού και ματιού (αριστερά και δεξιά)
+                            # 105: Αριστερό φρύδι, 159: Αριστερό άνω βλέφαρο
+                            # 336: Δεξί φρύδι, 386: Δεξί άνω βλέφαρο
+                            left_eyebrow_dist = math.hypot(landmarks[105].x - landmarks[159].x, landmarks[105].y - landmarks[159].y)
+                            right_eyebrow_dist = math.hypot(landmarks[336].x - landmarks[386].x, landmarks[336].y - landmarks[386].y)
+                            
+                            # Παίρνουμε τον μέσο όρο και των δύο ματιών για μεγαλύτερη ακρίβεια
+                            avg_eyebrow_dist = (left_eyebrow_dist + right_eyebrow_dist) / 2
+                            
+                            # Το όριο (Threshold). Αν δεις ότι δυσκολεύεσαι να κάνεις κλικ, 
+                            # κάνε αυτό το νούμερο μικρότερο (π.χ. 0.035). Αν κάνει κλικ μόνο του, κάν' το μεγαλύτερο (π.χ. 0.045).
+                            eyebrow_threshold = 0.055 
+                            
+                            if avg_eyebrow_dist > eyebrow_threshold:
+                                # Αν τα φρύδια είναι σηκωμένα και ΔΕΝ έχουμε ήδη κάνει κλικ
+                                if not self.is_eyebrow_clicked:
+                                    pydirectinput.click()
+                                    self.is_eyebrow_clicked = True
+                                    print(f"🖱️ [CLICK] Φρύδια σηκώθηκαν! (Απόσταση: {avg_eyebrow_dist:.3f})")
+                                    cv2.putText(rgb_frame, "CLICK!", (10, 70), 0, 1.5, (0, 255, 0), 3)
+                            else:
+                                # Αν τα φρύδια κατέβηκαν, επαναφέρουμε τον διακόπτη
+                                self.is_eyebrow_clicked = False
                                 
-                                self.dwell_start_time = time.time()
                         else:
-                            self.is_dwelling = False
-                            self.dwell_start_time = time.time()
-                            self.last_cursor_x = current_x
-                            self.last_cursor_y = current_y
-
+                            # 4. Κατάσταση Παύσης (Pause Mode)
+                            self.last_injected_pos = (actual_mouse_x, actual_mouse_y)
+                            remaining_time = self.mouse_pause_until - current_time
+                            cv2.putText(rgb_frame, f"MOUSE OVERRIDE: {remaining_time:.1f}s", (10, 30), 0, 1, (0, 0, 255), 2)
                         # ---------------------------------------------------------
                         # Δ. Έλεγχος Κινήσεων Προσώπου (Gestures to Keys)
                         # ---------------------------------------------------------
-                        if face_landmarks:
-                            landmarks = face_landmarks.landmark
-                            
-                            # 1. Υπολογισμός αποστάσεων (Ευκλείδεια απόσταση) για βασικά σημεία
-                            current_metrics = {
-                                "mouth_open": math.hypot(landmarks[13].x - landmarks[14].x, landmarks[13].y - landmarks[14].y),
-                                "smile": math.hypot(landmarks[61].x - landmarks[291].x, landmarks[61].y - landmarks[291].y),
-                                "left_eye_blink": math.hypot(landmarks[159].x - landmarks[145].x, landmarks[159].y - landmarks[145].y),
-                                "right_eye_blink": math.hypot(landmarks[386].x - landmarks[374].x, landmarks[386].y - landmarks[374].y)
-                            }
+                        try:
+                            # 1. Υπολογισμός αποστάσεων
+                            if face_landmarks:
+                                landmarks = face_landmarks.landmark
+                                current_metrics = {
+                                    "mouth_open": math.hypot(landmarks[13].x - landmarks[14].x, landmarks[13].y - landmarks[14].y),
+                                    "smile": math.hypot(landmarks[61].x - landmarks[291].x, landmarks[61].y - landmarks[291].y),
+                                    "left_eye_blink": math.hypot(landmarks[159].x - landmarks[145].x, landmarks[159].y - landmarks[145].y),
+                                    "right_eye_blink": math.hypot(landmarks[386].x - landmarks[374].x, landmarks[386].y - landmarks[374].y)
+                                }
 
-                            # 2. Έλεγχος καταχωρημένων κινήσεων για το ενεργό προφίλ
-                            for action, data in self.active_mappings.items():
-                                target_key = data["key"]
-                                threshold = data["threshold"]
-                                
-                                is_active = False
-                                
-                                # Λογική ενεργοποίησης ανάλογα με τον τύπο της κίνησης
-                                if action in ["mouth_open", "smile"]:
-                                    # Ενεργοποίηση όταν η απόσταση ΜΕΓΑΛΩΝΕΙ (ξεπερνά το όριο)
-                                    is_active = current_metrics[action] > threshold
-                                elif action in ["left_eye_blink", "right_eye_blink"]:
-                                    # Ενεργοποίηση όταν η απόσταση ΜΙΚΡΑΙΝΕΙ (πέφτει κάτω από το όριο)
-                                    is_active = current_metrics[action] < threshold
+                                # 2. Δυναμικός Έλεγχος καταχωρημένων κινήσεων (ΔΕΝ ψάχνουμε το "mouth_open" με το χέρι!)
+                                for action, data in self.active_mappings.items():
+                                    target_key = data["key"]
+                                    threshold = data["threshold"]
+                                    
+                                    if action not in current_metrics:
+                                        continue
+                                        
+                                    is_active = False
+                                    
+                                    if action in ["mouth_open", "smile"]:
+                                        is_active = current_metrics[action] > threshold
+                                    elif action in ["left_eye_blink", "right_eye_blink"]:
+                                        is_active = current_metrics[action] < threshold
 
-                                # 3. Εντολές στο PyDirectInput (Μόνο 1 φορά ανά πάτημα/άφημα)
-                                if is_active:
-                                    if target_key not in self.pressed_keys:
-                                        pydirectinput.keyDown(target_key)
-                                        self.pressed_keys.add(target_key)
-                                        print(f"🟢 [ΕΝΕΡΓΟ] {action} -> Πατήθηκε: {target_key.upper()}")
-                                else:
-                                    if target_key in self.pressed_keys:
-                                        pydirectinput.keyUp(target_key)
-                                        self.pressed_keys.remove(target_key)
-                                        print(f"🔴 [ΑΝΕΝΕΡΓΟ] {action} -> Απελευθερώθηκε: {target_key.upper()}")
-                            target_key = self.active_mappings["mouth_open"]
-                            upper_lip = face_landmarks.landmark[13]
-                            lower_lip = face_landmarks.landmark[14]
-                            
-                            # Υπολογισμός απόστασης (κανονικοποιημένη)
-                            mouth_dist = math.hypot(upper_lip.x - lower_lip.x, upper_lip.y - lower_lip.y)
-                            
-                            # Βασικό όριο (threshold) που επηρεάζεται από το sensitivity
-                            base_threshold = 0.05 
-                            adjusted_threshold = base_threshold / sensitivity
-                            
-                            if mouth_dist > adjusted_threshold:
-                                if target_key not in self.pressed_keys:
-                                    pydirectinput.keyDown(target_key)
-                                    self.pressed_keys.add(target_key)
-                                    print(f"Action: {target_key} (DOWN)")
-                            else:
-                                if target_key in self.pressed_keys:
-                                    pydirectinput.keyUp(target_key)
-                                    self.pressed_keys.remove(target_key)
-                                    print(f"Action: {target_key} (UP)")
+                                    # 3. Εντολές στο PyDirectInput
+                                    if is_active:
+                                        if target_key not in self.pressed_keys:
+                                            pydirectinput.keyDown(target_key)
+                                            self.pressed_keys.add(target_key)
+                                            print(f"🟢 [ΕΝΕΡΓΟ] {action} -> Πατήθηκε: {target_key.upper()}")
+                                    else:
+                                        if target_key in self.pressed_keys:
+                                            pydirectinput.keyUp(target_key)
+                                            self.pressed_keys.remove(target_key)
+                                            print(f"🔴 [ΑΝΕΝΕΡΓΟ] {action} -> Απελευθερώθηκε: {target_key.upper()}")
+                                            
+                        except Exception as e:
+                            print(f"❌ ΣΦΑΛΜΑ ΣΤΑ GESTURES: {e}")
 
             # 3. Μετατροπή και Εμφάνιση στο GUI
             img = Image.fromarray(rgb_frame)
