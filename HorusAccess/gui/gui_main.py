@@ -196,7 +196,13 @@ class MotionRegistrationWindow(ctk.CTkToplevel):
         self.mapping_frame = ctk.CTkFrame(self, fg_color="transparent")
 
         ctk.CTkLabel(self.mapping_frame, text="Όνομα Κίνησης:").grid(row=0, column=0, padx=10, pady=10, sticky="e")
-        self.action_dropdown = ctk.CTkOptionMenu(self.mapping_frame, values=["mouth_open", "left_eye_blink", "right_eye_blink", "eyebrows_up", "smile"])
+        
+        self.action_dropdown = ctk.CTkOptionMenu(
+            self, 
+            values=["mouth_open", "smile", "left_eye_blink", "right_eye_blink"],
+            font=ctk.CTkFont(size=16)
+        )
+        self.action_dropdown.pack(pady=(5, 20))
         self.action_dropdown.grid(row=0, column=1, padx=10, pady=10)
 
         ctk.CTkLabel(self.mapping_frame, text="Πλήκτρο:").grid(row=1, column=0, padx=10, pady=10, sticky="e")
@@ -211,6 +217,44 @@ class MotionRegistrationWindow(ctk.CTkToplevel):
 
         # Έναρξη
         self.start_countdown()
+
+    def auto_categorize_movement(self, recorded_landmarks):
+        """Αναλύει τα καρέ και βρίσκει ποια από τις 10 κινήσεις έγινε."""
+        if not recorded_landmarks:
+            return None, 0.0
+
+        import math
+
+        # 1. Ετοιμάζουμε τις κενές λίστες
+        metrics = {
+            "mouth_open": [], "smile": [], "eyebrows_up": [], 
+            "left_eye_blink": [], "right_eye_blink": [], "kiss": [], 
+            "jaw_left": [], "jaw_right": [], "nose_scrunch": [], "cheek_puff": []
+        }
+
+        # 2. Γεμίζουμε τις λίστες με τις αποστάσεις από κάθε καρέ
+        for face_landmarks in recorded_landmarks:
+            landmarks = face_landmarks.landmark
+            
+            metrics["mouth_open"].append(math.hypot(landmarks[13].x - landmarks[14].x, landmarks[13].y - landmarks[14].y))
+            metrics["smile"].append(math.hypot(landmarks[61].x - landmarks[291].x, landmarks[61].y - landmarks[291].y))
+            metrics["eyebrows_up"].append((math.hypot(landmarks[105].x - landmarks[159].x, landmarks[105].y - landmarks[159].y) + math.hypot(landmarks[336].x - landmarks[386].x, landmarks[336].y - landmarks[386].y)) / 2)
+            metrics["left_eye_blink"].append(math.hypot(landmarks[159].x - landmarks[145].x, landmarks[159].y - landmarks[145].y))
+            metrics["right_eye_blink"].append(math.hypot(landmarks[386].x - landmarks[374].x, landmarks[386].y - landmarks[374].y))
+            metrics["kiss"].append(math.hypot(landmarks[61].x - landmarks[291].x, landmarks[61].y - landmarks[291].y))
+            metrics["jaw_left"].append(math.hypot(landmarks[152].x - landmarks[132].x, landmarks[152].y - landmarks[132].y))
+            metrics["jaw_right"].append(math.hypot(landmarks[152].x - landmarks[361].x, landmarks[152].y - landmarks[361].y))
+            metrics["nose_scrunch"].append(math.hypot(landmarks[1].x - landmarks[13].x, landmarks[1].y - landmarks[13].y))
+            metrics["cheek_puff"].append(math.hypot(landmarks[50].x - landmarks[280].x, landmarks[50].y - landmarks[280].y))
+
+        # 3. Βρίσκουμε την κίνηση με τη μεγαλύτερη διακύμανση (Max - Min)
+        changes = {}
+        for action, values in metrics.items():
+            if values:
+                changes[action] = max(values) - min(values)
+
+        recognized_action = max(changes, key=changes.get)
+        return recognized_action, changes[recognized_action]       
 
     def start_countdown(self):
         """Επαναφέρει το UI και ξεκινά την αντίστροφη μέτρηση."""
@@ -290,6 +334,19 @@ class MotionRegistrationWindow(ctk.CTkToplevel):
         """Αποθήκευση στη βάση με Δυναμικό/Προσωποποιημένο Υπολογισμό Ορίου (Threshold)."""
         action = self.action_dropdown.get()
         key = self.key_dropdown.get()
+        detected_action, score = self.auto_categorize_movement(self.parent.recorded_landmarks)
+        # --- 1. ΥΠΟΛΟΓΙΣΜΟΣ ΠΡΟΣΩΠΙΚΟΥ ΟΡΙΟΥ ΑΠΟ ΤΑ ΚΑΤΑΓΕΓΡΑΜΜΕΝΑ ΚΑΡΕ ---
+        if detected_action:
+            action = detected_action
+            print(f"🧠 Η AI επέλεξε αυτόματα: {action} (Ένταση: {score:.3f})")
+            
+            # Προαιρετικά: Ενημερώνουμε και το UI για να το βλέπει ο χρήστης
+            if hasattr(self, 'action_dropdown'):
+                self.action_dropdown.set(action)
+        else:
+            action = self.action_dropdown.get()
+            print("⚠️ Δεν εντοπίστηκε ξεκάθαρη κίνηση, χρήση χειροκίνητης επιλογής.")
+            
         
         # --- 1. ΥΠΟΛΟΓΙΣΜΟΣ ΠΡΟΣΩΠΙΚΟΥ ΟΡΙΟΥ ΑΠΟ ΤΑ ΚΑΤΑΓΕΓΡΑΜΜΕΝΑ ΚΑΡΕ ---
         personal_threshold = 0.05 # Προεπιλογή ασφαλείας
@@ -683,17 +740,23 @@ class SmartControllerApp(ctk.CTk):
                         # Δ. Έλεγχος Κινήσεων Προσώπου (Gestures to Keys)
                         # ---------------------------------------------------------
                         try:
-                            # 1. Υπολογισμός αποστάσεων
+                            # 1. Υπολογισμός και των 10 αποστάσεων ζωντανά
                             if face_landmarks:
                                 landmarks = face_landmarks.landmark
                                 current_metrics = {
                                     "mouth_open": math.hypot(landmarks[13].x - landmarks[14].x, landmarks[13].y - landmarks[14].y),
                                     "smile": math.hypot(landmarks[61].x - landmarks[291].x, landmarks[61].y - landmarks[291].y),
+                                    "eyebrows_up": (math.hypot(landmarks[105].x - landmarks[159].x, landmarks[105].y - landmarks[159].y) + math.hypot(landmarks[336].x - landmarks[386].x, landmarks[336].y - landmarks[386].y)) / 2,
                                     "left_eye_blink": math.hypot(landmarks[159].x - landmarks[145].x, landmarks[159].y - landmarks[145].y),
-                                    "right_eye_blink": math.hypot(landmarks[386].x - landmarks[374].x, landmarks[386].y - landmarks[374].y)
+                                    "right_eye_blink": math.hypot(landmarks[386].x - landmarks[374].x, landmarks[386].y - landmarks[374].y),
+                                    "kiss": math.hypot(landmarks[61].x - landmarks[291].x, landmarks[61].y - landmarks[291].y),
+                                    "jaw_left": math.hypot(landmarks[152].x - landmarks[132].x, landmarks[152].y - landmarks[132].y),
+                                    "jaw_right": math.hypot(landmarks[152].x - landmarks[361].x, landmarks[152].y - landmarks[361].y),
+                                    "nose_scrunch": math.hypot(landmarks[1].x - landmarks[13].x, landmarks[1].y - landmarks[13].y),
+                                    "cheek_puff": math.hypot(landmarks[50].x - landmarks[280].x, landmarks[50].y - landmarks[280].y)
                                 }
 
-                                # 2. Δυναμικός Έλεγχος καταχωρημένων κινήσεων (ΔΕΝ ψάχνουμε το "mouth_open" με το χέρι!)
+                                # 2. Δυναμικός Έλεγχος
                                 for action, data in self.active_mappings.items():
                                     target_key = data["key"]
                                     threshold = data["threshold"]
@@ -703,9 +766,12 @@ class SmartControllerApp(ctk.CTk):
                                         
                                     is_active = False
                                     
-                                    if action in ["mouth_open", "smile"]:
+                                    # ΟΜΑΔΑ 1: Ενεργοποιούνται όταν η απόσταση ΜΕΓΑΛΩΝΕΙ
+                                    if action in ["mouth_open", "smile", "eyebrows_up", "cheek_puff"]:
                                         is_active = current_metrics[action] > threshold
-                                    elif action in ["left_eye_blink", "right_eye_blink"]:
+                                        
+                                    # ΟΜΑΔΑ 2: Ενεργοποιούνται όταν η απόσταση ΜΙΚΡΑΙΝΕΙ
+                                    elif action in ["left_eye_blink", "right_eye_blink", "kiss", "jaw_left", "jaw_right", "nose_scrunch"]:
                                         is_active = current_metrics[action] < threshold
 
                                     # 3. Εντολές στο PyDirectInput
