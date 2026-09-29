@@ -124,7 +124,7 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
                         pass
 
         # ==========================================
-        # 2. STEAM DETECTOR (με αυτόματη εικόνα μέσω AppID)
+        # 2. STEAM DETECTOR 
         # ==========================================
         steam_paths = [
             r"C:\Program Files (x86)\Steam\steamapps",
@@ -280,32 +280,51 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
     def select_game(self, game):
         print(f"🤖 [Horus AI] Αναλύονται οι λειτουργίες για: {game['title']}...")
         
-        # Έλεγχος αν πρόκειται για Browser/Desktop App
-        is_browser = any(b in game['title'].lower() for b in ["opera", "chrome", "edge", "firefox", "browser"])
-
-        # Σύντομες λίστες για να μην μπερδεύεται το μοντέλο
+        game_title_lower = game['title'].lower()
+        
+        # 1. Αναγνώριση Κατηγορίας
+        is_browser = any(b in game_title_lower for b in ["opera", "chrome", "edge", "firefox", "browser"])
+        is_2d_platformer = any(p in game_title_lower for p in ["sonic", "mario", "celeste", "hollow knight", "limbo", "cuphead"])
+        
         available_motions = [
             "mouth_open", "smile", "left_eye_blink", "right_eye_blink",
             "eyebrows_up", "eyebrows_frown", "head_up", "head_down", "head_left", "head_right"
         ]
 
+        # 2. Εξειδικευμένες Οδηγίες & Επιτρεπόμενα Πλήκτρα ανά Κατηγορία
         if is_browser:
             context_instruction = "Η εφαρμογή είναι BROWSER. Χρησιμοποίησε ΜΟΝΟ: left_click, right_click, down, up, enter, space."
+            allowed_keys = ["left_click", "right_click", "up", "down", "space", "enter"]
+        elif is_2d_platformer:
+            context_instruction = (
+                "Η εφαρμογή είναι 2D PLATFORMER GAME (π.χ. Sonic). "
+                "ΑΠΑΓΟΡΕΥΟΝΤΑΙ ΑΥΣΤΗΡΑ ΤΑ MOUSE CLICKS! "
+                "Χρησιμοποίησε ΜΟΝΟ keys πληκτρολογίου: w, a, s, d, space, left, right, up, down."
+            )
+            allowed_keys = ["w", "a", "s", "d", "space", "left", "right", "up", "down"]
         else:
-            context_instruction = "Η εφαρμογή είναι ΠΑΙΧΝΙΔΙ. Χρησιμοποίησε GAMING KEYS όπως: w, a, s, d, space, left_click."
+            context_instruction = "Η εφαρμογή είναι GENERIC PC GAME. Χρησιμοποίησε GAMING KEYS: w, a, s, d, space, left_click."
+            allowed_keys = ["w", "a", "s", "d", "space", "left_click", "right_click", "enter"]
 
-        prompt = f"""Task: Create 3 face-to-key mappings for '{game['title']}'.
+        # 3. Σύνταξη Αυστηρού Prompt
+        prompt = f"""You are an AI Accessibility Assistant for HorusAccess.
+Task: Create 3 to 4 optimal face-motion to key mappings for the game '{game['title']}'.
+
+CRITICAL CONTEXT:
 {context_instruction}
 
-Allowed Motions: {json.dumps(available_motions)}
-Allowed Keys: ["w", "a", "s", "d", "space", "enter", "up", "down", "left_click", "right_click"]
+STRICT CONSTRAINTS:
+- Allowed Motions: {json.dumps(available_motions)}
+- Allowed Keys ONLY from this list: {json.dumps(allowed_keys)}
+- Do NOT use mouse clicks if the game is a 2D Platformer.
 
-Respond strictly in this JSON format:
+Respond STRICTLY in valid JSON format (without any markdown formatting or extra text):
 {{
   "mappings": [
-    {{"motion": "mouth_open", "key": "left_click", "description": "Left Click / Select"}},
-    {{"motion": "eyebrows_up", "key": "right_click", "description": "Right Click / Menu"}},
-    {{"motion": "head_down", "key": "down", "description": "Scroll Down"}}
+    {{"motion": "head_left", "key": "a", "description": "Move Left"}},
+    {{"motion": "head_right", "key": "d", "description": "Move Right"}},
+    {{"motion": "mouth_open", "key": "space", "description": "Jump / Spin Dash"}},
+    {{"motion": "head_down", "key": "s", "description": "Crouch / Roll"}}
   ]
 }}"""
 
@@ -325,14 +344,21 @@ Respond strictly in this JSON format:
                     format='json'
                 )
             
-            result = json.loads(response['message']['content'])
+            raw_content = response['message']['content'].strip()
+            
+            # Καθαρισμός τυχόν markdown formatting (π.χ. ```json ... ```)
+            if raw_content.startswith("```"):
+                raw_content = raw_content.split("```")[1]
+                if raw_content.startswith("json"):
+                    raw_content = raw_content[4:]
+            
+            result = json.loads(raw_content)
             mappings = result.get("mappings", [])
 
         except Exception as e:
             print(f"⚠️ Σφάλμα απόκρισης Ollama: {e}")
 
         # --- FALLBACK / SAFETY NET ---
-        # Αν το LLM επέστρεψε κενή λίστα, φτιάχνουμε αυτόματα λογικά defaults
         if not mappings:
             print("⚠️ Το LLM δεν επέστρεψε mappings. Εφαρμογή έξυπνου Fallback...")
             if is_browser:
@@ -342,6 +368,13 @@ Respond strictly in this JSON format:
                     {"motion": "head_down", "key": "down", "description": "Scroll Down"},
                     {"motion": "head_up", "key": "up", "description": "Scroll Up"}
                 ]
+            elif is_2d_platformer:
+                mappings = [
+                    {"motion": "head_left", "key": "a", "description": "Κίνηση Αριστερά"},
+                    {"motion": "head_right", "key": "d", "description": "Κίνηση Δεξιά"},
+                    {"motion": "mouth_open", "key": "space", "description": "Άλμα (Jump)"},
+                    {"motion": "head_down", "key": "s", "description": "Σκύψιμο (Crouch)"}
+                ]
             else:
                 mappings = [
                     {"motion": "mouth_open", "key": "space", "description": "Jump / Action"},
@@ -350,7 +383,7 @@ Respond strictly in this JSON format:
                     {"motion": "head_right", "key": "d", "description": "Move Right"}
                 ]
 
-        # 1. Εύρεση του πρώτου κενού (null) προφίλ (από 1 έως 5)
+        # 1. Εύρεση του πρώτου κενού προφίλ (1 έως 5)
         target_profile = 1
         if hasattr(self.parent, 'db'):
             for p_id in range(1, 6):
@@ -863,64 +896,77 @@ class SmartControllerApp(ctk.CTk):
         print(f"Ενεργά Mappings ανανεώθηκαν: {self.active_mappings}")
 
     def __init__(self):
-        self.active_mappings = {}
-        self.pressed_keys = set()
-        self.is_recording_motion = False
-        self.recorded_landmarks = []
-        self.recorded_frames = []
-        super().__init__()
-
-        self.title("Smart Controller - Σχεδίαση & Υλοποίηση")
-        self.geometry("1100x700")
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
-
-        self.db = DBManager()
-        self.current_profile_id = 1
-        
-        # --- MediaPipe Setup ---
-        self.mp_face_mesh = mp.solutions.face_mesh
-        self.face_mesh = self.mp_face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=True, 
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        self.mp_drawing = mp.solutions.drawing_utils
-        self.mp_drawing_styles = mp.solutions.drawing_styles
-
-        # --- Παράμετροι Ποντικιού ---
-        self.screen_w, self.screen_h = pydirectinput.size()
-        self.mouse_control_active = True 
-        
-        self.mouse_pause_until = 0.0      
-        self.last_injected_pos = None     
-
-        self.smooth_x, self.smooth_y = self.screen_w // 2, self.screen_h // 2
-        
-        self.dwell_start_time = time.time()
-        self.last_cursor_x, self.last_cursor_y = 0, 0
-        self.dwell_threshold = 30  
-        self.dwell_duration = 2.0  
-        self.is_dwelling = False
-
-        self._build_ui()
-        self.load_profile_data(1)
-
-        self.is_eyebrow_clicked = False
-        
-        # --- OpenCV Setup ---
-        print("🔍 Προσπάθεια ανοίγματος της κάμερας στο ID: 0...")
-        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-        print("✅ Η κάμερα στο ID 0 άνοιξε επιτυχώς!")
-        
-        self.neutral_nose_x = None  
-        self.neutral_nose_y = None
-        self.deadzone_radius = 0.025 
-        
-        self.cap.set(3, 640) 
-        self.cap.set(4, 480)
+            super().__init__()  # Το super() πρέπει να καλείται πρώτο
+    
+            self.active_mappings = {}
+            self.pressed_keys = set()
+            self.is_recording_motion = False
+            self.recorded_landmarks = []
+            self.recorded_frames = []
+    
+            self.title("Smart Controller - Σχεδίαση & Υλοποίηση")
+            self.geometry("1100x700")
+            ctk.set_appearance_mode("dark")
+            ctk.set_default_color_theme("blue")
+    
+            self.db = DBManager()
+            self.current_profile_id = 1
+            
+            # --- MediaPipe Setup ---
+            self.mp_face_mesh = mp.solutions.face_mesh
+            self.face_mesh = self.mp_face_mesh.FaceMesh(
+                max_num_faces=1,
+                refine_landmarks=True, 
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            self.mp_drawing = mp.solutions.drawing_utils
+            self.mp_drawing_styles = mp.solutions.drawing_styles
+    
+            # --- Παράμετροι Ποντικιού ---
+            # Χρήση του pyautogui.size() για ασφάλεια στις διαστάσεις
+            self.screen_w, self.screen_h = pyautogui.size()
+            self.mouse_control_active = True 
+            
+            self.mouse_pause_until = 0.0      
+            self.last_injected_pos = None     
+    
+            self.smooth_x, self.smooth_y = self.screen_w // 2, self.screen_h // 2
+            self.virtual_x, self.virtual_y = float(self.screen_w // 2), float(self.screen_h // 2)
+            
+            self.dwell_start_time = time.time()
+            self.last_cursor_x, self.last_cursor_y = 0, 0
+            self.dwell_threshold = 30  
+            self.dwell_duration = 2.0  
+            self.is_dwelling = False
+            self.is_eyebrow_clicked = False
+    
+            self._build_ui()
+            self.load_profile_data(1)
+            
+            # --- OpenCV Setup ---
+            print("🔍 Προσπάθεια ανοίγματος της κάμερας στο ID: 0...")
+            self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            
+            if not self.cap.isOpened():
+                print("❌ Αποτυχία ανοίγματος κάμερας!")
+            else:
+                print("✅ Η κάμερα στο ID 0 άνοιξε επιτυχώς!")
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640) 
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            
+            self.neutral_nose_x = None  
+            self.neutral_nose_y = None
+            self.deadzone_radius = 0.025 
+    
+            # --- Σωστή εκκίνηση του Video Loop ---
+            # Χρησιμοποιούμε after() ώστε το UI να προλάβει να εμφανιστεί πρώτα!
+            self.after(100, self.start_video_loop)
+    
+    def start_video_loop(self):
         self.update_video()
+             # Καλεί το update_video ξανά μετά από 15ms (~60 FPS)
+        self.after(15, self.start_video_loop)
 
     def _build_ui(self):
         """Κατασκευάζει το User Interface σε Μοντέρνο Stealth Στυλ."""
@@ -1093,94 +1139,101 @@ class SmartControllerApp(ctk.CTk):
         self.sens_value_label.configure(text=f"{value:.1f}")
 
     def update_video(self):
-        ret, frame = self.cap.read()
-        if ret:
+        try:
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                return
+
             frame = cv2.flip(frame, 1)
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.face_mesh.process(rgb_frame)
 
-            if results.multi_face_landmarks:
+            if results and results.multi_face_landmarks:
                 for face_landmarks in results.multi_face_landmarks:
-                    if getattr(self, 'is_recording_motion', False):
-                        self.recorded_landmarks.append(face_landmarks)
-                        self.recorded_frames.append(rgb_frame.copy())
-
-                    self.mp_drawing.draw_landmarks(
-                        image=rgb_frame,
-                        landmark_list=face_landmarks,
-                        connections=self.mp_face_mesh.FACEMESH_TESSELATION,
-                        landmark_drawing_spec=None,
-                        connection_drawing_spec=self.mp_drawing_styles.get_default_face_mesh_tesselation_style()
-                    )
-
                     if getattr(self, 'mouse_control_active', False):
                         current_time = time.time()
-                        sensitivity = self.sens_slider.get()
+                        
+                        sens_val = 1.0
+                        if hasattr(self, 'sens_slider'):
+                            try:
+                                sens_val = float(self.sens_slider.get())
+                            except Exception:
+                                sens_val = 1.0
 
+                        # Landmarks
                         nose = face_landmarks.landmark[1]
+                        left_face = face_landmarks.landmark[234]
+                        right_face = face_landmarks.landmark[454]
+                        top_face = face_landmarks.landmark[10]
+                        bottom_face = face_landmarks.landmark[152]
 
-                        if getattr(self, 'neutral_nose_x', None) is None:
-                            self.neutral_nose_x = nose.x
-                            self.neutral_nose_y = nose.y
+                        # 1. Υπολογισμός Γωνίας Κλίσης Κεφαλιού (Roll - Δεξιά/Αριστερά)
+                        roll_tilt = right_face.y - left_face.y
+
+                        # 2. Υπολογισμός Πάνω/Κάτω (Pitch)
+                        face_center_y = (top_face.y + bottom_face.y) / 2.0
+                        pitch_tilt = nose.y - face_center_y
+
+                        # 3. Νεκρές Ζώνες (Deadzones)
+                        deadzone_roll = 0.025   # Ανοχή στο γέρσιμο
+                        deadzone_pitch = 0.005  # Πολύ ευαίσθητο στο πάνω/κάτω (ξεκινάει αμέσως)
+
+                        move_x = 0.0
+                        move_y = 0.0
+
+                        # 4. Υπολογισμός κίνησης X βάσει γέρσιματος (Roll)
+                        if abs(roll_tilt) > deadzone_roll:
+                            sign_x = 1 if roll_tilt > 0 else -1
+                            excess_x = abs(roll_tilt) - deadzone_roll
+                            move_x = sign_x * (excess_x * 500 * sens_val)
+
+                        # 5. Υπολογισμός κίνησης Y βάσει κλίσης πάνω/κάτω (Pitch)
+                        if abs(pitch_tilt) > deadzone_pitch:
+                            sign_y = 1 if pitch_tilt > 0 else -1
+                            excess_y = abs(pitch_tilt) - deadzone_pitch
+                            # Αυξημένος πολλαπλασιαστής (1200) για υπερ-ταχεία απόκριση με ελάχιστη κίνηση
+                            move_y = sign_y * (excess_y * 1200 * sens_val)
+
+                        # 6. Ενημέρωση εικονικών συντεταγμένων
+                        if not hasattr(self, 'virtual_x'):
                             init_x, init_y = pyautogui.position()
                             self.virtual_x = float(init_x)
                             self.virtual_y = float(init_y)
 
-                        actual_mouse_x, actual_mouse_y = pyautogui.position()
-                        last_pos = getattr(self, 'last_injected_pos', None)
-                        pause_until = getattr(self, 'mouse_pause_until', 0.0)
+                        self.virtual_x += move_x
+                        self.virtual_y += move_y
 
-                        if last_pos is not None:
-                            dist_moved = math.hypot(actual_mouse_x - last_pos[0], actual_mouse_y - last_pos[1])
-                            if dist_moved > 25:
-                                self.mouse_pause_until = current_time + 3.0
-                                pause_until = self.mouse_pause_until
-                                self.virtual_x = float(actual_mouse_x)
-                                self.virtual_y = float(actual_mouse_y)
+                        # 7. Όρια οθόνης
+                        screen_w = getattr(self, 'screen_w', 1920)
+                        screen_h = getattr(self, 'screen_h', 1080)
 
-                        if current_time >= pause_until:
-                            dx = nose.x - self.neutral_nose_x
-                            dy = (nose.y - self.neutral_nose_y) * 1.6
+                        self.virtual_x = max(0, min(screen_w - 1, self.virtual_x))
+                        self.virtual_y = max(0, min(screen_h - 1, self.virtual_y))
 
-                            displacement_length = math.hypot(dx, dy)
-                            deadzone = 0.040
+                        # 8. Εκτέλεση κίνησης
+                        target_x = int(self.virtual_x)
+                        target_y = int(self.virtual_y)
 
-                            if displacement_length > deadzone:
-                                excess = displacement_length - deadzone
-                                speed = (excess ** 1.5) * 650 * sensitivity
-                                move_x = (dx / displacement_length) * speed
-                                move_y = (dy / displacement_length) * speed
+                        pydirectinput.moveTo(target_x, target_y)
+                        self.last_injected_pos = (target_x, target_y)
+                    else:
+                        self.last_injected_pos = (actual_mouse_x, actual_mouse_y)
+                        cv2.putText(rgb_frame, "PAUSED (MOUSE OVERRIDE)", (10, 30), 0, 0.8, (0, 0, 255), 2)
+                        # Κλικ με το στόμα
+                    upper_lip = face_landmarks.landmark[13]
+                    lower_lip = face_landmarks.landmark[14]
+                    mouth_open_length = abs(lower_lip.y - upper_lip.y)
+                    click_threshold = 0.06 / max(sens_val, 0.1)
 
-                                self.virtual_x += move_x
-                                self.virtual_y += move_y
-
-                                self.virtual_x = max(0, min(self.screen_w - 1, self.virtual_x))
-                                self.virtual_y = max(0, min(self.screen_h - 1, self.virtual_y))
-
-                            target_x, target_y = self.apply_magnetic_snap(
-                                int(self.virtual_x), int(self.virtual_y), snap_threshold=45
-                            )
-
-                            pydirectinput.moveTo(target_x, target_y)
-                            self.last_injected_pos = (target_x, target_y)
-                        else:
-                            self.last_injected_pos = (actual_mouse_x, actual_mouse_y)
-                            cv2.putText(rgb_frame, "PAUSED (MOUSE OVERRIDE)", (10, 30), 0, 0.8, (0, 0, 255), 2)
-
-                        upper_lip = face_landmarks.landmark[13]
-                        lower_lip = face_landmarks.landmark[14]
-
-                        mouth_open_length = abs(lower_lip.y - upper_lip.y)
-                        click_threshold = 0.06 / sensitivity
-
-                        if mouth_open_length > click_threshold:
-                            if not getattr(self, 'mouth_click_triggered', False):
-                                pyautogui.click()
-                                print("🎯 Click με το στόμα!")
-                                self.mouth_click_triggered = True
+                    if mouth_open_length > click_threshold:
+                        if not getattr(self, 'mouth_click_triggered', False):
+                            pyautogui.click()
+                            print("🎯 Click με το στόμα!")
+                            self.mouth_click_triggered = True
                         else:
                             self.mouth_click_triggered = False
 
+                    # Gestures
                     try:
                         landmarks = face_landmarks.landmark
                         current_metrics = {
@@ -1198,10 +1251,10 @@ class SmartControllerApp(ctk.CTk):
 
                         active_mappings = getattr(self, 'active_mappings', {})
                         for action, data in active_mappings.items():
-                            target_key = data["key"]
-                            threshold = data["threshold"]
+                            target_key = data.get("key")
+                            threshold = data.get("threshold")
 
-                            if action not in current_metrics:
+                            if not target_key or action not in current_metrics:
                                 continue
 
                             is_active = False
@@ -1231,7 +1284,8 @@ class SmartControllerApp(ctk.CTk):
             self.video_label.configure(image=ctk_img)
             self.video_label.image = ctk_img
 
-        self.after(33, self.update_video)
+        except Exception as global_err:
+            print(f"⚠️ Σφάλμα στο update_video: {global_err}")
 
     def add_motion_event(self):
         db_instance = getattr(self, 'db', None)
