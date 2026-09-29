@@ -212,13 +212,15 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
         return detected_games
 
     def _build_ui(self):
+        # 1. Εμφάνιση Τίτλου
         ctk.CTkLabel(
             self, 
             text="🤖 ΕΓΚΑΤΕΣΤΗΜΕΝΑ ΠΑΙΧΝΙΔΙΑ (Horus AI)", 
-            font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"), 
+            font=ctk.CTkFont(family="Segoe UI", size=24, weight="bold"), 
             text_color="#00f0ff"
-        ).pack(pady=(20, 5))
+        ).pack(pady=(20, 10))
 
+        # 2. Scrollable Frame για το πλέγμα των παιχνιδιών
         grid_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
         grid_frame.pack(fill="both", expand=True, padx=20, pady=10)
         grid_frame.grid_columnconfigure((0, 1, 2), weight=1, uniform="col")
@@ -229,53 +231,66 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
 
             # Κάρτα Παιχνιδιού
             card = ctk.CTkFrame(grid_frame, fg_color="#1f2128", corner_radius=12, border_color="#2b2d35", border_width=1)
-            card.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
+            card.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
 
-            # 1. Προσπάθεια Φόρτωσης Εικόνας (με fallback αναζήτησης τίτλου)
+            # 1. Προσπάθεια Φόρτωσης Εικόνας
             ctk_img = fetch_game_image(
                 game_title=game.get('title', ''), 
                 image_url=game.get('image_url'), 
-                size=(180, 100)
+                size=(220, 120)  # Ελαφρώς μεγαλύτερη εικόνα
             )
 
             if ctk_img:
                 img_label = ctk.CTkLabel(card, image=ctk_img, text="")
-                img_label.image = ctk_img  # Κράτηση reference για Garbage Collection
-                img_label.pack(pady=(10, 5), padx=10)
+                img_label.image = ctk_img  # Garbage collection reference
+                img_label.pack(pady=(12, 6), padx=10)
             else:
-                # Fallback εικονίδιο μόνο αν αποτύχουν όλα
-                ctk.CTkLabel(card, text="🎮", font=ctk.CTkFont(size=40)).pack(pady=(20, 10))
+                # Fallback εικονίδιο
+                ctk.CTkLabel(card, text="🎮", font=ctk.CTkFont(size=45)).pack(pady=(20, 10))
 
             # 2. Τίτλος Παιχνιδιού
             ctk.CTkLabel(
                 card, 
                 text=game.get('title', 'Άγνωστο Παιχνίδι'), 
-                font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+                font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
                 text_color="#ffffff",
-                wraplength=180
+                wraplength=200
             ).pack(pady=(5, 2), padx=8)
 
             # 3. Badge Πλατφόρμας
             ctk.CTkLabel(
                 card, 
                 text=f"• {game.get('platform', 'PC')} •", 
-                font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
                 text_color="#00ffaa"
-            ).pack(pady=(0, 8))
+            ).pack(pady=(0, 10))
 
-            # 4. Κουμπί Επιλογής
+            # 4. Μεγάλο Κουμπί Επιλογής (Easy Target)
             btn = ctk.CTkButton(
                 card,
-                text="Ανάλυση & Επιλογή",
-                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                text="🎯 Ανάλυση & Επιλογή",
+                font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
                 fg_color="#00f0ff",
                 text_color="#111215",
                 hover_color="#00ffaa",
-                height=30,
-                corner_radius=6,
+                height=48,  # Αυξημένο ύψος για εύκολη επιλογή
+                corner_radius=8,
                 command=lambda g=game: self.select_game(g)
             )
-            btn.pack(pady=(0, 12), padx=12, fill="x")
+            btn.pack(pady=(0, 15), padx=12, fill="x")
+
+        # 3. ΜΕΓΑΛΟ ΚΟΥΜΠΙ ΚΛΕΙΣΙΜΟΥ (Large Close Target)
+        self.close_btn = ctk.CTkButton(
+            self,
+            text="❌ ΚΛΕΙΣΙΜΟ",
+            font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
+            height=55,                  # Μεγάλο ύψος για εύκολο στόχο
+            fg_color="#c0392b",
+            hover_color="#e74c3c",
+            corner_radius=12,
+            command=self.destroy        # Κλείνει το παράθυρο/frame
+        )
+        self.close_btn.pack(pady=15, padx=30, fill="x")
     
     def select_game(self, game):
         print(f"🤖 [Horus AI] Αναλύονται οι λειτουργίες για: {game['title']}...")
@@ -308,23 +323,27 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
 
         # 3. Σύνταξη Αυστηρού Prompt
         prompt = f"""You are an AI Accessibility Assistant for HorusAccess.
-Task: Create 3 to 4 optimal face-motion to key mappings for the game '{game['title']}'.
+Task: Create optimal face-motion and head-tracking to key mappings for the game '{game['title']}'.
 
-CRITICAL CONTEXT:
+CRITICAL GAME CONTEXT:
 {context_instruction}
 
-STRICT CONSTRAINTS:
-- Allowed Motions: {json.dumps(available_motions)}
-- Allowed Keys ONLY from this list: {json.dumps(allowed_keys)}
-- Do NOT use mouse clicks if the game is a 2D Platformer.
+STRICT RULES & CONSTRAINTS:
+1. KEY ANALYSIS: Inspect '{game['title']}' controls. Map ONLY keys that are ACTUALLY used by this specific game (e.g. if WASD/Space/Enter are used, restrict choices strictly to those).
+2. HEAD MOVEMENTS PRIORITY: ALWAYS prioritize head motions (head_left, head_right, head_up, head_down) for character movement keys (e.g. W, A, S, D or Arrow Keys).
+3. FACIAL GESTURES FOR ACTIONS: Use secondary facial gestures (mouth_open, eyebrows_up, smile, left_eye_blink, right_eye_blink) ONLY for action buttons (e.g. Jump, Spin Dash, Attack).
+4. ALLOWED MOTIONS: {json.dumps(available_motions)}
+5. ALLOWED KEYS ONLY FROM THIS LIST: {json.dumps(allowed_keys)}
+6. Do NOT use mouse clicks if the game is a 2D Platformer or Arcade game.
 
-Respond STRICTLY in valid JSON format (without any markdown formatting or extra text):
+Respond STRICTLY with a valid JSON object matching this schema:
 {{
   "mappings": [
     {{"motion": "head_left", "key": "a", "description": "Move Left"}},
     {{"motion": "head_right", "key": "d", "description": "Move Right"}},
-    {{"motion": "mouth_open", "key": "space", "description": "Jump / Spin Dash"}},
-    {{"motion": "head_down", "key": "s", "description": "Crouch / Roll"}}
+    {{"motion": "head_up", "key": "w", "description": "Move Forward / Jump"}},
+    {{"motion": "head_down", "key": "s", "description": "Crouch / Move Down"}},
+    {{"motion": "mouth_open", "key": "space", "description": "Action / Spin Dash"}}
   ]
 }}"""
 
@@ -346,14 +365,16 @@ Respond STRICTLY in valid JSON format (without any markdown formatting or extra 
             
             raw_content = response['message']['content'].strip()
             
-            # Καθαρισμός τυχόν markdown formatting (π.χ. ```json ... ```)
-            if raw_content.startswith("```"):
-                raw_content = raw_content.split("```")[1]
-                if raw_content.startswith("json"):
-                    raw_content = raw_content[4:]
-            
+            # Απευθείας parsing καθώς το format='json' του Ollama εγγυάται καθαρό JSON
             result = json.loads(raw_content)
-            mappings = result.get("mappings", [])
+            
+            # Fallback αν το μοντέλο επιστρέψει λίστα αντί για dictionary
+            if isinstance(result, list):
+                mappings = result
+            else:
+                mappings = result.get("mappings", [])
+
+            print(f"✅ Δημιουργήθηκαν {len(mappings)} mappings για το {game['title']}")
 
         except Exception as e:
             print(f"⚠️ Σφάλμα απόκρισης Ollama: {e}")
@@ -493,12 +514,32 @@ class ProfileReviewWindow(ctk.CTkToplevel):
         self.load_data()
 
     def _build_ui(self):
-        ctk.CTkLabel(self, text="Διαχείριση Κινήσεων", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=20)
+        # 1. Εμφάνιση Τίτλου
+        ctk.CTkLabel(
+            self, 
+            text="Διαχείριση Κινήσεων", 
+            font=ctk.CTkFont(size=24, weight="bold"),
+            text_color="#00f0ff"
+        ).pack(pady=(20, 10))
 
-        self.scroll_frame = ctk.CTkScrollableFrame(self, width=680, height=420)
+        # 2. Scrollable Frame για τη λίστα των κινήσεων
+        self.scroll_frame = ctk.CTkScrollableFrame(self, width=720, height=400)
         self.scroll_frame.pack(pady=10, padx=20, fill="both", expand=True)
 
-    # ---> ΕΔΩ ΜΠΑΙΝΕΙ Η ΝΕΑ load_data() ΠΟΥ ΕΓΡΑΨΑ ΠΑΝΩ <---
+        # 3. ΜΕΓΑΛΟ ΚΟΥΜΠΙ ΚΛΕΙΣΙΜΟΥ (Large Close Target)
+        self.close_btn = ctk.CTkButton(
+            self,
+            text="❌ ΚΛΕΙΣΙΜΟ",
+            font=ctk.CTkFont(size=20, weight="bold"),
+            height=55,                  # Μεγάλο ύψος για εύκολο στόχο
+            fg_color="#c0392b",
+            hover_color="#e74c3c",
+            corner_radius=12,
+            command=self.destroy        # Κλείνει το παράθυρο/frame
+        )
+        self.close_btn.pack(pady=15, padx=30, fill="x")
+
+    
 
     def delete_entry(self, mapping_id):
         self.db.delete_mapping(mapping_id)
@@ -535,19 +576,34 @@ class ProfileReviewWindow(ctk.CTkToplevel):
             if game_name:
                 profile_name = f"Προφίλ {self.profile_id} - {game_name}"
         elif hasattr(self.parent, 'profile_games') and self.profile_id in self.parent.profile_games:
-            # Fallback αν το κρατάμε στη μνήμη του parent
             profile_name = f"Προφίλ {self.profile_id} - {self.parent.profile_games[self.profile_id]}"
 
         # 2. Εμφάνιση Τίτλου
         ctk.CTkLabel(
             self, 
             text=f"Διαχείριση Κινήσεων\n({profile_name})", 
-            font=ctk.CTkFont(size=22, weight="bold"),
+            font=ctk.CTkFont(size=24, weight="bold"),
             text_color="#00f0ff"
         ).pack(pady=15)
 
-        self.scroll_frame = ctk.CTkScrollableFrame(self, width=680, height=400)
+        # 3. Scrollable Frame για τις κινήσεις
+        self.scroll_frame = ctk.CTkScrollableFrame(self, width=720, height=380)
         self.scroll_frame.pack(pady=10, padx=20, fill="both", expand=True)
+
+        # 4. ΜΕΓΑΛΟ ΚΟΥΜΠΙ ΚΛΕΙΣΙΜΟΥ (Large Close Target)
+        self.close_btn = ctk.CTkButton(
+            self,
+            text="❌ ΚΛΕΙΣΙΜΟ",
+            font=ctk.CTkFont(size=20, weight="bold"),
+            height=55,                  # Μεγάλο ύψος για εύκολο στόχο
+            fg_color="#c0392b",
+            hover_color="#e74c3c",
+            corner_radius=12,
+            command=self.destroy        # Κλείνει το παράθυρο/frame
+        )
+        self.close_btn.pack(pady=15, padx=30, fill="x")
+
+    
 
     def load_data(self):
         """Φορτώνει τα mappings σε 3 στήλες: 
