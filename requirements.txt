@@ -1,0 +1,9 @@
+customtkinter
+opencv-python
+mediapipe
+Pillow
+pydirectinput
+pyautogui
+ollama
+pywin32
+requests
