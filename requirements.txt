@@ -1,9 +1,14 @@
+# Core (all platforms)
 customtkinter
 opencv-python
 mediapipe
 Pillow
-pydirectinput
 pyautogui
 ollama
-pywin32
 requests
+
+# Windows only - raw Scan Code injection (mandatory on Windows for DirectX games)
+pydirectinput; sys_platform == "win32"
+
+# Windows only - .lnk shortcut scanning, WScript.Shell, GOG registry hive
+pywin32; sys_platform == "win32"

@@ -2,26 +2,37 @@ import customtkinter as ctk
 import cv2
 import mediapipe as mp
 from PIL import Image
-import pydirectinput
 import time
 import math
 import os
 import sys
-import pyautogui
 import json
 import ollama
-import glob
-import winshell 
 import io
 import requests
-from win32com.client import Dispatch
+from core.input_backend import (
+    key_down,
+    key_up,
+    click as click_mouse,
+    mouse_move,
+    mouse_position,
+    open_webcam,
+    screen_size,
+    disable_failsafe,
+)
+from core.ui_utils import default_font_family
+from core.game_detector import detect_installed_games
 from database.db_manager import DBManager
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+def ui_font(**kwargs):
+    """CTkFont που χρησιμοποιεί πάντα οικογένεια γραμματοσειρών διαθέσιμη στο τρέχον OS."""
+    return ctk.CTkFont(family=default_font_family(), **kwargs)
+
 def fetch_game_image(game_title, image_url=None, size=(180, 100)):
     """Κατεβάζει την εικόνα του παιχνιδιού. Αν δεν υπάρχει URL, ψάχνει αυτόματα εικόνα βάσει τίτλου."""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) HorusAccess/1.0"}
     
     # 1. Δοκιμή λήψης από το απευθείας URL αν υπάρχει
     if image_url:
@@ -54,7 +65,7 @@ def fetch_game_image(game_title, image_url=None, size=(180, 100)):
     return None
 
 # horus AI
-pydirectinput.FAILSAFE = False
+disable_failsafe()
 class AutonomousGameSelectorWindow(ctk.CTkToplevel):
     """Παράθυρο πλέγματος που εμφανίζει τα πραγματικά εγκατεστημένα παιχνίδια του PC."""
 
@@ -76,147 +87,23 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
 
 
     def detect_installed_games(self):
-        """Ανιχνεύει ΑΠΟΚΛΕΙΣΤΙΚΑ παιχνίδια από Epic Games, Steam, GOG και εξειδικευμένους φακέλους."""
-        detected_games = []
-        found_names = set()
+        """Ανιχνεύει παιχνίδια από Steam, Epic, GOG και τον φάκελο εφαρμογών.
 
-        # Λίστα αποκλεισμού για συστήματα/εργαλεία που μπορεί να ξεφύγουν από launchers
-        ignored_keywords = [
-            "opera", "browser", "code", "visual studio", "wps", "office", "word", "excel", 
-            "powerpoint", "administration", "tools", "librewolf", "chrome", "firefox", 
-            "edge", "discord", "spotify", "vlc", "uninstall", "setup", "help", "python", 
-            "git", "node", "cmd", "powershell", "control panel", "settings", "redistributable",
-            "steamworks", "proton", "prerequisites", "epic online services"
-        ]
-
-        def is_valid_game(name):
-            if not name:
-                return False
-            name_lower = name.lower()
-            return not any(ignored in name_lower for ignored in ignored_keywords)
-
-        # ==========================================
-        # 1. EPIC GAMES DETECTOR (με εικόνα)
-        # ==========================================
-        epic_manifest_path = r"C:\ProgramData\Epic\EpicGamesLauncher\Data\Manifests"
-        if os.path.exists(epic_manifest_path):
-            for file in os.listdir(epic_manifest_path):
-                if file.endswith(".item"):
-                    try:
-                        with open(os.path.join(epic_manifest_path, file), "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                            game_name = data.get("DisplayName")
-                            
-                            # Λήψη εικόνας από τα μεταδεδομένα της Epic (αν υπάρχει)
-                            img_url = None
-                            # Για το Sonic Mania / Epic Games fallback URL:
-                            if game_name and "Sonic Mania" in game_name:
-                                img_url = "https://cdn2.unrealengine.com/egs-sonicmania-sega-s2-1200x1600-244243640.jpg"
-
-                            if game_name and game_name not in found_names and is_valid_game(game_name):
-                                found_names.add(game_name)
-                                detected_games.append({
-                                    "title": game_name,
-                                    "platform": "Epic Games",
-                                    "image_url": img_url
-                                })
-                    except Exception:
-                        pass
-
-        # ==========================================
-        # 2. STEAM DETECTOR 
-        # ==========================================
-        steam_paths = [
-            r"C:\Program Files (x86)\Steam\steamapps",
-            r"C:\Program Files\Steam\steamapps",
-            r"D:\SteamLibrary\steamapps",
-            r"E:\SteamLibrary\steamapps",
-        ]
-
-        for s_path in steam_paths:
-            if os.path.exists(s_path):
-                manifests = glob.glob(os.path.join(s_path, "appmanifest_*.acf"))
-                for mfile in manifests:
-                    try:
-                        with open(mfile, "r", encoding="utf-8", errors="ignore") as f:
-                            content = f.read()
-                            if '"name"' in content and '"appid"' in content:
-                                name_line = [l for l in content.split("\n") if '"name"' in l][0]
-                                appid_line = [l for l in content.split("\n") if '"appid"' in l][0]
-                                
-                                game_name = name_line.split('"')[3]
-                                app_id = appid_line.split('"')[3]
-                                
-                                # Εικόνα εξωφύλλου απευθείας από το CDN του Steam
-                                img_url = f"https://cdn.akamai.steamstatic.com/steam/apps/{app_id}/header.jpg"
-                                
-                                if game_name not in found_names and is_valid_game(game_name):
-                                    found_names.add(game_name)
-                                    detected_games.append({
-                                        "title": game_name,
-                                        "platform": "Steam",
-                                        "image_url": img_url
-                                    })
-                    except Exception:
-                        pass
-        # ==========================================
-        # 3. GOG GALAXY DETECTOR (Windows Registry)
-        # ==========================================
+        Η λογική ζει στο core/game_detector.py ώστε να είναι κοινή για
+        Windows, Linux και macOS."""
         try:
-            import winreg
-            gog_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\GOG.com\Games")
-            i = 0
-            while True:
-                try:
-                    subkey_name = winreg.EnumKey(gog_key, i)
-                    subkey = winreg.OpenKey(gog_key, subkey_name)
-                    game_name, _ = winreg.QueryValueEx(subkey, "gameName")
-                    if game_name and game_name not in found_names and is_valid_game(game_name):
-                        found_names.add(game_name)
-                        detected_games.append({
-                            "title": game_name,
-                            "platform": "GOG",
-                            "genre": "GOG Game"
-                        })
-                    i += 1
-                except OSError:
-                    break
-        except Exception:
-            pass
+            return detect_installed_games()
+        except Exception as e:
+            print(f"⚠️ Αποτυχία ανίχνευσης εγκατεστημένων παιχνιδιών: {e}")
+            return []
 
-        # ==========================================
-        # 4. ΣΚΑΝΑΡΙΣΜΑ ΜΟΝΟ ΣΤΗΝ ΕΠΙΦΑΝΕΙΑ ΕΡΓΑΣΙΑΣ (Desktop Shortcuts)
-        # ==========================================
-        # Ψάχνουμε ΜΟΝΟ στο Desktop και ΟΧΙ στο Start Menu/Programs
-        desktop_dir = winshell.desktop()
-        if os.path.exists(desktop_dir):
-            shell = Dispatch("WScript.Shell")
-            for file in os.listdir(desktop_dir):
-                if file.endswith(".lnk"):
-                    shortcut_path = os.path.join(desktop_dir, file)
-                    try:
-                        target = shell.CreateShortCut(shortcut_path).Targetpath
-                        game_name = file.replace(".lnk", "")
-                        
-                        # Αν δείχνει σε .exe και ΔΕΝ είναι στη λίστα αποκλεισμού
-                        if target.endswith(".exe") and is_valid_game(game_name) and game_name not in found_names:
-                            found_names.add(game_name)
-                            detected_games.append({
-                                "title": game_name,
-                                "platform": "PC Game",
-                                "genre": "Standalone Game"
-                            })
-                    except Exception:
-                        pass
-
-        return detected_games
 
     def _build_ui(self):
         # 1. Εμφάνιση Τίτλου
         ctk.CTkLabel(
             self, 
             text="🤖 ΕΓΚΑΤΕΣΤΗΜΕΝΑ ΠΑΙΧΝΙΔΙΑ (Horus AI)", 
-            font=ctk.CTkFont(family="Segoe UI", size=24, weight="bold"), 
+            font=ui_font(size=24, weight="bold"), 
             text_color="#00f0ff"
         ).pack(pady=(20, 10))
 
@@ -252,7 +139,7 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
             ctk.CTkLabel(
                 card, 
                 text=game.get('title', 'Άγνωστο Παιχνίδι'), 
-                font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
+                font=ui_font(size=15, weight="bold"),
                 text_color="#ffffff",
                 wraplength=200
             ).pack(pady=(5, 2), padx=8)
@@ -261,7 +148,7 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
             ctk.CTkLabel(
                 card, 
                 text=f"• {game.get('platform', 'PC')} •", 
-                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                font=ui_font(size=12, weight="bold"),
                 text_color="#00ffaa"
             ).pack(pady=(0, 10))
 
@@ -269,7 +156,7 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
             btn = ctk.CTkButton(
                 card,
                 text="🎯 Ανάλυση & Επιλογή",
-                font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+                font=ui_font(size=14, weight="bold"),
                 fg_color="#00f0ff",
                 text_color="#111215",
                 hover_color="#00ffaa",
@@ -283,7 +170,7 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
         self.close_btn = ctk.CTkButton(
             self,
             text="❌ ΚΛΕΙΣΙΜΟ",
-            font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
+            font=ui_font(size=20, weight="bold"),
             height=55,                  # Μεγάλο ύψος για εύκολο στόχο
             fg_color="#c0392b",
             hover_color="#e74c3c",
@@ -429,14 +316,14 @@ Respond STRICTLY with a valid JSON object matching this schema:
         ctk.CTkLabel(
             dialog, 
             text="🤖 ΤΟ HORUS AI ΠΡΟΤΕΙΝΕΙ:", 
-            font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"), 
+            font=ui_font(size=20, weight="bold"), 
             text_color="#00f0ff"
         ).pack(pady=(20, 5))
 
         ctk.CTkLabel(
             dialog, 
             text=f"Παιχνίδι: {game_title}\nΘα γίνει αποθήκευση στο Προφίλ {target_profile}", 
-            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"), 
+            font=ui_font(size=14, weight="bold"), 
             text_color="#00ffaa"
         ).pack(pady=(0, 15))
 
@@ -449,7 +336,7 @@ Respond STRICTLY with a valid JSON object matching this schema:
             ctk.CTkLabel(
                 scroll_frame, 
                 text=row_str, 
-                font=ctk.CTkFont(family="Segoe UI", size=14), 
+                font=ui_font(size=14), 
                 text_color="#ffffff",
                 anchor="w"
             ).pack(fill="x", pady=4, padx=10)
@@ -486,7 +373,7 @@ Respond STRICTLY with a valid JSON object matching this schema:
         btn_ok = ctk.CTkButton(
             dialog,
             text="OK (Αποδοχή & Αποθήκευση)",
-            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+            font=ui_font(size=16, weight="bold"),
             height=45,
             fg_color="#00ffaa",
             text_color="#111215",
@@ -619,7 +506,7 @@ class ProfileReviewWindow(ctk.CTkToplevel):
             ctk.CTkLabel(
                 self.scroll_frame,
                 text="⚠️ Δεν υπάρχουν καταχωρημένες κινήσεις για αυτό το προφίλ.",
-                font=ctk.CTkFont(family="Segoe UI", size=14),
+                font=ui_font(size=14),
                 text_color="#6c7281"
             ).pack(pady=40)
             return
@@ -765,9 +652,9 @@ class MotionInputWindow(ctk.CTkToplevel):
         self.resizable(False, False)
         self.grab_set()
 
-        self.font_title = ctk.CTkFont(family="Segoe UI", size=18, weight="bold")
-        self.font_labels = ctk.CTkFont(family="Segoe UI", size=14, weight="bold")
-        self.font_keys = ctk.CTkFont(family="Segoe UI", size=13, weight="bold")
+        self.font_title = ui_font(size=18, weight="bold")
+        self.font_labels = ui_font(size=14, weight="bold")
+        self.font_keys = ui_font(size=13, weight="bold")
 
         self.grid_columnconfigure(0, weight=4) 
         self.grid_columnconfigure(1, weight=6) 
@@ -980,8 +867,8 @@ class SmartControllerApp(ctk.CTk):
             self.mp_drawing_styles = mp.solutions.drawing_styles
     
             # --- Παράμετροι Ποντικιού ---
-            # Χρήση του pyautogui.size() για ασφάλεια στις διαστάσεις
-            self.screen_w, self.screen_h = pyautogui.size()
+            # Χρήση του screen_size() για ασφάλεια στις διαστάσεις
+            self.screen_w, self.screen_h = screen_size()
             self.mouse_control_active = True 
             
             self.mouse_pause_until = 0.0      
@@ -1001,15 +888,17 @@ class SmartControllerApp(ctk.CTk):
             self.load_profile_data(1)
             
             # --- OpenCV Setup ---
+            # Το backend της κάμερας επιλέγεται αυτόματα ανά OS (DSHOW/V4L2/AVFoundation)
             print("🔍 Προσπάθεια ανοίγματος της κάμερας στο ID: 0...")
-            self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-            
-            if not self.cap.isOpened():
+            self.cap = open_webcam(0, 640, 480)
+
+            if self.cap is None or not self.cap.isOpened():
                 print("❌ Αποτυχία ανοίγματος κάμερας!")
+                if self.cap is not None:
+                    self.cap.release()
+                    self.cap = None
             else:
                 print("✅ Η κάμερα στο ID 0 άνοιξε επιτυχώς!")
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640) 
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             
             self.neutral_nose_x = None  
             self.neutral_nose_y = None
@@ -1031,8 +920,8 @@ class SmartControllerApp(ctk.CTk):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        font_main = ctk.CTkFont(family="Segoe UI", size=16, weight="bold")
-        font_logo = ctk.CTkFont(family="Segoe UI", size=20, weight="bold")
+        font_main = ui_font(size=16, weight="bold")
+        font_logo = ui_font(size=20, weight="bold")
 
         BG_MAIN = "#111215"          
         BG_SIDEBAR = "#16171b"       
@@ -1195,6 +1084,9 @@ class SmartControllerApp(ctk.CTk):
         self.sens_value_label.configure(text=f"{value:.1f}")
 
     def update_video(self):
+        if self.cap is None:
+            return
+
         try:
             ret, frame = self.cap.read()
             if not ret or frame is None:
@@ -1252,7 +1144,7 @@ class SmartControllerApp(ctk.CTk):
 
                         # 6. Ενημέρωση εικονικών συντεταγμένων
                         if not hasattr(self, 'virtual_x'):
-                            init_x, init_y = pyautogui.position()
+                            init_x, init_y = mouse_position()
                             self.virtual_x = float(init_x)
                             self.virtual_y = float(init_y)
 
@@ -1270,10 +1162,10 @@ class SmartControllerApp(ctk.CTk):
                         target_x = int(self.virtual_x)
                         target_y = int(self.virtual_y)
 
-                        pydirectinput.moveTo(target_x, target_y)
+                        mouse_move(target_x, target_y)
                         self.last_injected_pos = (target_x, target_y)
                     else:
-                        self.last_injected_pos = (actual_mouse_x, actual_mouse_y)
+                        self.last_injected_pos = tuple(mouse_position())
                         cv2.putText(rgb_frame, "PAUSED (MOUSE OVERRIDE)", (10, 30), 0, 0.8, (0, 0, 255), 2)
                         # Κλικ με το στόμα
                     upper_lip = face_landmarks.landmark[13]
@@ -1283,7 +1175,7 @@ class SmartControllerApp(ctk.CTk):
 
                     if mouth_open_length > click_threshold:
                         if not getattr(self, 'mouth_click_triggered', False):
-                            pyautogui.click()
+                            click_mouse()
                             print("🎯 Click με το στόμα!")
                             self.mouth_click_triggered = True
                         else:
@@ -1323,12 +1215,12 @@ class SmartControllerApp(ctk.CTk):
                             pressed_keys = getattr(self, 'pressed_keys', set())
                             if is_active:
                                 if target_key not in pressed_keys:
-                                    pydirectinput.keyDown(target_key)
+                                    key_down(target_key)
                                     pressed_keys.add(target_key)
                                     print(f"🟢 [ΕΝΕΡΓΟ] {action} -> Πατήθηκε: {target_key.upper()}")
                             else:
                                 if target_key in pressed_keys:
-                                    pydirectinput.keyUp(target_key)
+                                    key_up(target_key)
                                     pressed_keys.remove(target_key)
                                     print(f"🔴 [ΑΝΕΝΕΡΓΟ] {action} -> Απελευθερώθηκε: {target_key.upper()}")
 
@@ -1353,7 +1245,9 @@ class SmartControllerApp(ctk.CTk):
         review_popup.grab_set()
 
     def on_closing(self):
-        self.cap.release()
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
         self.destroy()
 
     def get_all_widgets(self, parent=None):
