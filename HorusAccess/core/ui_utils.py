@@ -16,6 +16,13 @@ _PREFERRED_FAMILIES = {
 
 _FALLBACK_FAMILY = "Arial"
 
+# Ψευδώνυμα που το Tk εκθέτει σε κάθε build. Δεν είνε γραμματοσειρές και δεν
+# πρέπει να επιλεγούν ποτέ (το 'fixed' προκαλεί bitmap/άσχημο κείμενο).
+_NON_FONT_ALIASES = {
+    "fixed", "nil", "cursor", "icon", "menu", "text", "system", "roman",
+    "cursive", "fantasy", "helvetica", "times",
+}
+
 _cache = {}
 
 
@@ -39,7 +46,7 @@ def default_font_family():
     if cached:
         return cached
 
-    available = available_font_families()
+    available = available_font_families() - _NON_FONT_ALIASES
     candidates = _PREFERRED_FAMILIES.get(sys.platform, [_FALLBACK_FAMILY])
 
     family = None
@@ -48,8 +55,15 @@ def default_font_family():
             family = candidate
             break
 
+    if family is None and available:
+        # Κανένα από τα προτιμώμενα: πάρουμε οποιαδήποτε πραγματική γραμματοσειρά
+        # απομένει, αποφεύγοντας τα aliases.
+        family = sorted(available)[0]
+
     if family is None:
-        family = sorted(available)[0] if available else _FALLBACK_FAMILY
+        # Καμία διαθέσιμη οικογένεια - αφήνουμε το Tk να επιλέξει, παρά να δίνουμε
+        # ένα άσχημο όνομα στον χρήστη.
+        family = _FALLBACK_FAMILY
 
     _cache[sys.platform] = family
     return family

@@ -1,7 +1,8 @@
 # Core (all platforms)
 customtkinter
 opencv-python
-mediapipe
+# Legacy Solutions API (mp.solutions) removed in 0.10.30+ / 1.x
+mediapipe==0.10.21
 Pillow
 pyautogui
 ollama
