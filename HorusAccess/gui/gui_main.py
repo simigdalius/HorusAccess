@@ -1,6 +1,7 @@
 import customtkinter as ctk
 import cv2
 import mediapipe as mp
+from tkinter import messagebox
 from PIL import Image
 import time
 import math
@@ -13,7 +14,6 @@ import requests
 from core.input_backend import (
     key_down,
     key_up,
-    click as click_mouse,
     mouse_move,
     mouse_position,
     open_webcam,
@@ -591,6 +591,16 @@ class ProfileReviewWindow(ctk.CTkToplevel):
         if self.is_locked:
             return
 
+        remaining = [row for row in self.db.get_mappings(self.profile_id) if row[0] != mapping_id]
+        if not any(row[2] == "left_click" for row in remaining):
+            messagebox.showwarning(
+                "Απαιτείται Κλικ",
+                "Το αριστερό κλικ (L. CLICK) πρέπει να έχει πάντα μια κίνηση.\n\n"
+                "Όρισε πρώτα άλλη κίνηση για το L. CLICK.",
+                parent=self,
+            )
+            return
+
         self.db.delete_mapping(mapping_id)
         print(f"Διαγράφηκε η κίνηση με ID {mapping_id}")
         self.load_data()
@@ -805,6 +815,20 @@ class MotionInputWindow(ctk.CTkToplevel):
             else:
                 clean_id = int(self.profile_id)
 
+            # The left click must always have a motion bound to it. If this
+            # change would leave no motion mapped to left_click, ask the user to
+            # bind another motion for click first.
+            pending = {row[1]: row[2] for row in self.db.get_mappings(clean_id)}
+            pending[self.selected_motion] = self.selected_key
+            if "left_click" not in pending.values():
+                messagebox.showwarning(
+                    "Απαιτείται Κλικ",
+                    "Το αριστερό κλικ (L. CLICK) πρέπει να έχει πάντα μια κίνηση.\n\n"
+                    "Διάλεξε πρώτα μια κίνηση για το L. CLICK και μετά άλλαξε αυτήν την αντιστοίχιση.",
+                    parent=self,
+                )
+                return
+
             self.db.save_mapping(
                 profile_id=clean_id,
                 action=self.selected_motion,
@@ -815,14 +839,30 @@ class MotionInputWindow(ctk.CTkToplevel):
         except Exception as e:
             print(f"❌ Σφάλμα κατά την εγγραφή στη βάση δεδομένων: {e}")
 
-        if hasattr(self.parent, 'load_profile_data'):
-            self.parent.load_profile_data(self.profile_id)
-        elif hasattr(self.parent, 'update_mappings_display'):
-            self.parent.update_mappings_display()
-        elif hasattr(self.parent, 'refresh_ui'):
-            self.parent.refresh_ui()
+        # Κρατάμε το παράθυρο ανοιχτό μετά την καταχώρηση, ώστε να μπορούν να
+        # προστεθούν και άλλες κινήσεις χωρίς να ξανανοίξει.
+        try:
+            if hasattr(self.parent, 'refresh_active_mappings'):
+                self.parent.refresh_active_mappings()
+            if hasattr(self.parent, 'load_profile_data'):
+                self.parent.load_profile_data(getattr(self.parent, 'current_profile_id', self.profile_id))
+        except Exception:
+            pass
+        self._reset_selection()
 
-        self.on_close()
+    def _reset_selection(self):
+        """Καθαρίζει την τρέχουσα επιλογή και απενεργοποιεί το κουμπί αποθήκευσης."""
+        self.selected_motion = None
+        self.selected_key = None
+        for btn in self.motion_buttons.values():
+            btn.configure(border_color=self.BORDER_DEFAULT, fg_color=self.BG_WIDGETS, text_color=self.TEXT_WHITE)
+        for btn in self.key_buttons.values():
+            btn.configure(border_color=self.BORDER_DEFAULT, fg_color=self.BG_WIDGETS, text_color=self.TEXT_WHITE)
+        self.btn_save.configure(
+            state="disabled",
+            border_color=self.BORDER_DEFAULT,
+            text_color=self.BORDER_DEFAULT,
+        )
 
     def on_close(self):
         self.grab_release()
@@ -853,7 +893,7 @@ class SmartControllerApp(ctk.CTk):
             ctk.set_default_color_theme("blue")
     
             self.db = DBManager()
-            self.current_profile_id = 1
+            self.current_profile_id = self.db.get_last_profile()
             
             # --- MediaPipe Setup ---
             self.mp_face_mesh = mp.solutions.face_mesh
@@ -870,7 +910,13 @@ class SmartControllerApp(ctk.CTk):
             # Χρήση του screen_size() για ασφάλεια στις διαστάσεις
             self.screen_w, self.screen_h = screen_size()
             self.mouse_control_active = True 
-            
+
+            # Head tracking is suspended while one of our own windows is focused
+            # so the user can actually hover/click the app's UI without the
+            # cursor being yanked away every frame.
+            self._app_has_focus = True
+            self._focus_token = 0
+
             self.mouse_pause_until = 0.0      
             self.last_injected_pos = None     
     
@@ -885,7 +931,8 @@ class SmartControllerApp(ctk.CTk):
             self.is_eyebrow_clicked = False
     
             self._build_ui()
-            self.load_profile_data(1)
+            self.load_profile_data(self.current_profile_id)
+            self.refresh_active_mappings()
             
             # --- OpenCV Setup ---
             # Το backend της κάμερας επιλέγεται αυτόματα ανά OS (DSHOW/V4L2/AVFoundation)
@@ -935,6 +982,11 @@ class SmartControllerApp(ctk.CTk):
 
         self.configure(fg_color=BG_MAIN)
 
+        # Track focus across every window of this app so head tracking can pause
+        # while the user is interacting with the UI (see _eval_app_focus).
+        self.bind_all("<FocusIn>", self._on_app_focus_in, add="+")
+        self.bind_all("<FocusOut>", self._on_app_focus_out, add="+")
+
         # ==========================================
         # 1. SIDEBAR (Αριστερή Πλευρά)
         # ==========================================
@@ -958,7 +1010,7 @@ class SmartControllerApp(ctk.CTk):
             text_color=TEXT_WHITE,
             command=self.change_profile
         )
-        self.profile_selector.set("1")
+        self.profile_selector.set(str(getattr(self, 'current_profile_id', 1)))
         self.profile_selector.pack(pady=10, padx=20, fill="x")
 
         # --- Ευαισθησία ---
@@ -1069,8 +1121,10 @@ class SmartControllerApp(ctk.CTk):
 
     def change_profile(self, value):
         self.current_profile_id = int(value)
+        self.db.set_last_profile(self.current_profile_id)
         print(f"--- Αλλαγή σε Προφίλ {self.current_profile_id} ---")
         self.refresh_active_mappings()
+        self.load_profile_data(self.current_profile_id)
 
     def load_profile_data(self, profile_id):
         profiles = self.db.get_all_profiles()
@@ -1082,6 +1136,26 @@ class SmartControllerApp(ctk.CTk):
 
     def update_sens_label(self, value):
         self.sens_value_label.configure(text=f"{value:.1f}")
+
+    def _on_app_focus_in(self, event=None):
+        self._focus_token += 1
+        self._app_has_focus = True
+
+    def _on_app_focus_out(self, event=None):
+        # Focus bounces between widgets inside the app, so wait a moment and
+        # only flag "unfocused" if the focus really left this application.
+        self._focus_token += 1
+        token = self._focus_token
+        self.after(80, lambda t=token: self._eval_app_focus(t))
+
+    def _eval_app_focus(self, token):
+        if token != self._focus_token:
+            return
+        try:
+            focused = self.focus_get()
+        except Exception:
+            focused = None
+        self._app_has_focus = focused is not None
 
     def update_video(self):
         if self.cap is None:
@@ -1098,15 +1172,17 @@ class SmartControllerApp(ctk.CTk):
 
             if results and results.multi_face_landmarks:
                 for face_landmarks in results.multi_face_landmarks:
-                    if getattr(self, 'mouse_control_active', False):
+                    # Needed by both the mouse-move branch and the mouth-click
+                    # check below, so compute it before the branch.
+                    sens_val = 1.0
+                    if hasattr(self, 'sens_slider'):
+                        try:
+                            sens_val = float(self.sens_slider.get())
+                        except Exception:
+                            sens_val = 1.0
+
+                    if getattr(self, 'mouse_control_active', False) and not getattr(self, '_app_has_focus', False):
                         current_time = time.time()
-                        
-                        sens_val = 1.0
-                        if hasattr(self, 'sens_slider'):
-                            try:
-                                sens_val = float(self.sens_slider.get())
-                            except Exception:
-                                sens_val = 1.0
 
                         # Landmarks
                         nose = face_landmarks.landmark[1]
@@ -1165,21 +1241,17 @@ class SmartControllerApp(ctk.CTk):
                         mouse_move(target_x, target_y)
                         self.last_injected_pos = (target_x, target_y)
                     else:
+                        # Re-sync the virtual cursor to the real pointer so the
+                        # mouse does not jump once tracking resumes.
+                        try:
+                            cur_x, cur_y = mouse_position()
+                            self.virtual_x = float(cur_x)
+                            self.virtual_y = float(cur_y)
+                        except Exception:
+                            pass
                         self.last_injected_pos = tuple(mouse_position())
-                        cv2.putText(rgb_frame, "PAUSED (MOUSE OVERRIDE)", (10, 30), 0, 0.8, (0, 0, 255), 2)
-                        # Κλικ με το στόμα
-                    upper_lip = face_landmarks.landmark[13]
-                    lower_lip = face_landmarks.landmark[14]
-                    mouth_open_length = abs(lower_lip.y - upper_lip.y)
-                    click_threshold = 0.06 / max(sens_val, 0.1)
-
-                    if mouth_open_length > click_threshold:
-                        if not getattr(self, 'mouth_click_triggered', False):
-                            click_mouse()
-                            print("🎯 Click με το στόμα!")
-                            self.mouth_click_triggered = True
-                        else:
-                            self.mouth_click_triggered = False
+                        if not getattr(self, '_app_has_focus', False):
+                            cv2.putText(rgb_frame, "PAUSED (MOUSE OVERRIDE)", (10, 30), 0, 0.8, (0, 0, 255), 2)
 
                     # Gestures
                     try:
@@ -1238,6 +1310,7 @@ class SmartControllerApp(ctk.CTk):
     def add_motion_event(self):
         db_instance = getattr(self, 'db', None)
         current_profile = self.profile_selector.get()
+        print("DEBUG: Add motion button pressed")
         MotionInputWindow(self, current_profile, db_instance)
 
     def open_review_window(self):
@@ -1245,6 +1318,10 @@ class SmartControllerApp(ctk.CTk):
         review_popup.grab_set()
 
     def on_closing(self):
+        try:
+            self.db.set_last_profile(self.current_profile_id)
+        except Exception:
+            pass
         if self.cap is not None:
             self.cap.release()
             self.cap = None

@@ -13,3 +13,6 @@ pydirectinput; sys_platform == "win32"
 
 # Windows only - .lnk shortcut scanning, WScript.Shell, GOG registry hive
 pywin32; sys_platform == "win32"
+
+# Linux only - more reliable mouse/keyboard injection than pure XTest
+pynput; sys_platform == "linux"

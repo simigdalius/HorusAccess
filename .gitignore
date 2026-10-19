@@ -24,3 +24,5 @@ Thumbs.db
 *.db
 *.sqlite3
 *.log
+
+HorusAccess/database/smart_controller.db

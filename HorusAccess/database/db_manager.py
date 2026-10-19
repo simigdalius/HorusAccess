@@ -39,6 +39,14 @@ class DBManager:
                     UNIQUE(profile_id, action)
                 )
             ''')
+
+            # Πίνακας Ρυθμίσεων (key/value) - π.χ. το τελευταίο ενεργό προφίλ
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            ''')
             conn.commit()
 
     def _initialize_profiles(self):
@@ -106,3 +114,31 @@ class DBManager:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM mappings WHERE id = ?', (mapping_id,))
             conn.commit()
+
+    # --- ΜΕΘΟΔΟΙ ΓΙΑ ΤΙΣ ΡΥΘΜΙΣΕΙΣ ---
+    def get_setting(self, key: str, default=None):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row[0] if row else default
+
+    def set_setting(self, key: str, value):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (key, str(value)),
+            )
+            conn.commit()
+
+    def get_last_profile(self) -> int:
+        """Επιστρέφει το τελευταίο ενεργό προφίλ (default 1)."""
+        try:
+            profile_id = int(self.get_setting("last_profile", 1))
+        except (TypeError, ValueError):
+            return 1
+        return profile_id if 1 <= profile_id <= 5 else 1
+
+    def set_last_profile(self, profile_id: int):
+        self.set_setting("last_profile", int(profile_id))
