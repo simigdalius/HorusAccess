@@ -1,4 +1,4 @@
-from gui.gui_main import SmartControllerApp
+from gui.main import SmartControllerApp
 
 def run_app():
     print("Ξεκινάει το Smart Controller...")
