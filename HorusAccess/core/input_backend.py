@@ -4,6 +4,8 @@ Windows uses ``pydirectinput`` (raw Scan Code injection - the only reliable way
 to talk to DirectX games) plus ``pyautogui`` for the screen metrics.
 Linux prefers ``pynput`` for mouse/keyboard injection when available (more
 reliable than pure XTest), falling back to ``pyautogui`` if it cannot be used.
+On sway/Wayland, pointer movement is routed through the compositor's IPC
+instead, because Wayland ignores XTest warps (see ``core/sway_ipc.py``).
 macOS uses ``pyautogui`` exclusively, because ``pydirectinput`` is a
 Windows-only extension and ``pynput`` is not always necessary there.
 
@@ -14,13 +16,19 @@ through here.
 
 import contextlib
 import io
+import os
 import sys
+import threading
+import time
+from collections import deque
 
 from .keys import BUTTON_ALIASES, normalize_key
+from .sway_ipc import SwayIPC
 
 IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
+IS_WAYLAND = IS_LINUX and bool(os.environ.get("WAYLAND_DISPLAY"))
 
 _driver = None
 _metrics = None
@@ -30,6 +38,20 @@ _kb_ctrl = None
 _kb_key = None
 _kb_code = None
 _linux_driver = "pyautogui"
+_sway = None
+_sway_error_logged = False
+
+# Physical-pointer tracking, only used with the sway backend. XWayland mirrors
+# the compositor pointer while it is over an X11 window, so the position can be
+# read back and compared with the last position we commanded. Our own warps are
+# filtered out that way, which keeps head tracking from mistaking itself for
+# the user.
+_MOUSE_LOCK = threading.Lock()
+_MOUSE_WARP_TOLERANCE = 3
+_RECENT_WARPS = deque(maxlen=16)
+_mouse_activity = 0
+_mouse_observed = None
+_mouse_last_seen = None
 
 
 @contextlib.contextmanager
@@ -77,6 +99,15 @@ with _mute_native_warnings():
                     import pyautogui as _driver  # type: ignore
                 except Exception:
                     _driver = None
+
+        # On sway/Wayland, XTest pointer warps never reach the compositor, so
+        # movement goes through sway's own IPC command instead. pynput is still
+        # initialised above for keyboard/button fallbacks on XWayland clients.
+        if IS_WAYLAND and os.environ.get("SWAYSOCK"):
+            try:
+                _sway = SwayIPC()
+            except Exception as exc:
+                print(f"⚠️ [input_backend] sway IPC unavailable: {exc}")
     else:  # macOS
         import pyautogui as _driver  # type: ignore
         _metrics = _driver
@@ -145,7 +176,92 @@ def disable_failsafe():
             pass
 
 
+def _pointer_app_position():
+    """Live XWayland pointer position in the app's coordinate space.
+
+    Returns ``None`` when no position can be read. XWayland mirrors the
+    compositor pointer only while it is over an X11 window (our own window, or
+    a game), which is exactly when a physical mouse move matters.
+    """
+    if _metrics is None or _sway is None:
+        return None
+    try:
+        global_x, global_y = _metrics.position()
+        origin_x, origin_y = _sway.origin()
+        width, height = _sway.size()
+    except Exception:
+        return None
+    return (
+        max(0, min(width - 1, int(global_x) - origin_x)),
+        max(0, min(height - 1, int(global_y) - origin_y)),
+    )
+
+
+def _poll_pointer():
+    """Counts pointer movement that did not come from our own warp.
+
+    Called right before each injected move, so a physical mouse movement is
+    observed before the next warp overwrites it. A pointer that keeps returning
+    the same position is over a native Wayland surface (XWayland freezes its
+    position there), so it is left alone and head tracking keeps working.
+    """
+    global _mouse_activity, _mouse_observed, _mouse_last_seen
+    position = _pointer_app_position()
+    if position is None:
+        return
+    with _MOUSE_LOCK:
+        previous = _mouse_last_seen
+        _mouse_last_seen = position
+        if previous is None or position == previous:
+            return
+        for warp_x, warp_y in _RECENT_WARPS:
+            if (
+                abs(position[0] - warp_x) <= _MOUSE_WARP_TOLERANCE
+                and abs(position[1] - warp_y) <= _MOUSE_WARP_TOLERANCE
+            ):
+                return
+        _mouse_observed = position
+        _mouse_activity += 1
+
+
+def _remember_warp(x, y):
+    """Records a position we are about to command."""
+    global _mouse_observed
+    position = (int(x), int(y))
+    with _MOUSE_LOCK:
+        _RECENT_WARPS.append(position)
+        _mouse_observed = position
+
+
+def mouse_activity_count():
+    """Count of physical pointer movements seen so far.
+
+    Only movements that XWayland forwards can be observed, which is enough for
+    the app's own (X11) window and for XWayland games. The counter stays at 0
+    on X11/Windows/macOS, where this module does not poll for them.
+    """
+    with _MOUSE_LOCK:
+        return _mouse_activity
+
+
 def mouse_move(x, y):
+    global _sway, _sway_error_logged
+    if _sway is not None:
+        try:
+            _poll_pointer()
+            width, height = _sway.size()
+            target_x = max(0, min(width - 1, int(x)))
+            target_y = max(0, min(height - 1, int(y)))
+            _remember_warp(target_x, target_y)
+            _sway.move(target_x, target_y)
+            return
+        except Exception as exc:
+            if not _sway_error_logged:
+                _sway_error_logged = True
+                print(f"⚠️ [input_backend] Αποτυχία μετακίνησης μέσω sway: {exc}")
+            # Stop using the compositor path and degrade to the X11 backend
+            # instead of raising on every frame.
+            _sway = None
     if IS_LINUX and _linux_driver == "pynput":
         _mouse_ctrl.position = (int(x), int(y))  # type: ignore
         return
@@ -155,6 +271,15 @@ def mouse_move(x, y):
 
 
 def mouse_position():
+    if _sway is not None:
+        _poll_pointer()
+        position = _pointer_app_position()
+        if position is not None:
+            return position
+        with _MOUSE_LOCK:
+            if _mouse_observed is not None:
+                return _mouse_observed
+        return _sway.position()
     if _metrics is not None:
         return _metrics.position()
     return (0, 0)
@@ -239,6 +364,8 @@ def key_up(key):
 
 
 def screen_size():
+    if _sway is not None:
+        return _sway.size()
     return _metrics.size()
 
 

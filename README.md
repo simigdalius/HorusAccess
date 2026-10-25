@@ -92,6 +92,8 @@ exists.
 - The camera opens automatically on device `0`. The terminal prints
   `✅ Η κάμερα στο ID 0 άνοιξε επιτυχώς!` on success. Face tracking is
   mirrored, so move your head as if looking at the screen.
+- The camera preview draws the face mesh by default. Set `SHOW_FACE_MESH =
+  False` at the top of `HorusAccess/main.py` to hide the overlay.
 - **Εισαγωγή Κίνησης** — pick a facial/head motion, then a key.
 - **Εμφάνιση Κατοχωρημένων** — review, edit or delete saved mappings.
 - The sensitivity slider scales the mouse and head-tracking gain.
@@ -106,6 +108,24 @@ directly. On Linux and macOS there is no equivalent, so `pyautogui` falls back
 to XTest / Quartz events. Many games capture input below that layer and will
 ignore them entirely. Mapping and calibration work normally; actual in-game
 response is best-effort and game-dependent.
+
+**Pointer movement on Wayland.** Wayland compositors ignore XTest pointer warps,
+so `pynput`/`pyautogui` can only move the pointer inside XWayland, not on the
+desktop. On **sway**, the app detects `WAYLAND_DISPLAY` together with
+`SWAYSOCK` and sends `seat - cursor set` over the sway IPC socket instead, which
+moves the compositor pointer without extra packages. Other compositors are not
+supported for pointer movement yet; they need something like `ydotool`/`uinput`
+(root access) or a RemoteDesktop portal. Keyboard and click injection still go
+through `pynput`, so they may be ignored by native Wayland windows.
+
+Each IPC warp also focuses the window that the pointer lands on, emulating sway's
+`focus_follows_mouse`, so hovering another app gives it the keyboard focus and
+the app's own UI can be aimed at and clicked too. Moving the physical mouse
+pauses head tracking for a few seconds, so the cursor can be repositioned by
+hand without the tracker pulling it back every frame. That detection relies on
+XWayland's pointer position, which is only mirrored while the pointer is over an
+X11 window, so it works over the app's UI and XWayland games but not over native
+Wayland surfaces.
 
 **mediapipe on Apple Silicon.** Official `mediapipe` wheels are built for
 Intel macOS; expect to build from source or use Rosetta on M-series Macs.

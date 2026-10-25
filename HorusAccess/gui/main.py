@@ -1,6 +1,7 @@
 import customtkinter as ctk
 import cv2
 import mediapipe as mp
+import numpy as np
 from tkinter import messagebox
 from PIL import Image, ImageTk
 import time
@@ -21,6 +22,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.input_backend import (
     key_down,
     key_up,
+    mouse_activity_count,
     mouse_move,
     mouse_position,
     open_webcam,
@@ -80,6 +82,10 @@ KEY_CHOICES = list(dict.fromkeys(
 ))
 KEY_OPTION_LABELS = [key_label(key) for key in KEY_CHOICES]
 KEY_BY_LABEL = {key_label(key): key for key in KEY_CHOICES}
+
+# Πόσο καιρό η χειροκίνητη κίνηση του ποντικιού αναστέλλει την κίνηση από το
+# κεφάλι. Κάθε νέα φυσική κίνηση ανανεώνει το διάστημα.
+MOUSE_OVERRIDE_SECONDS = 3.0
 
 
 def _validate_mappings(items, allowed_keys):
@@ -1206,12 +1212,14 @@ class SmartControllerApp(ctk.CTk):
             
         print(f"Ενεργά Mappings ανανεώθηκαν: {self.active_mappings}")
 
-    def __init__(self):
+    def __init__(self, show_face_mesh=True):
             super().__init__()  # Το super() πρέπει να καλείται πρώτο
     
             self.active_mappings = {}
             self.pressed_keys = set()
             self._sens_save_job = None
+            # Overlay switch, wired up in HorusAccess/main.py (SHOW_FACE_MESH).
+            self.show_face_mesh = show_face_mesh
     
             self.title("Smart Controller - Σχεδίαση & Υλοποίηση")
             self.geometry("1100x700")
@@ -1249,17 +1257,32 @@ class SmartControllerApp(ctk.CTk):
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5
             )
+
+            # Συνδέσεις για το πλέγμα που σχεδιάζεται πάνω στο πρόσωπο. Τα
+            # εικονοστοιχεία υπολογίζονται μία φορά και κάθε σύνολο σχεδιάζεται
+            # με ένα cv2.polylines (η ανά-γραμμή έκδοση κοστίζει 4x περισσότερο).
+            self._mesh_edges = np.array(
+                sorted(self.mp_face_mesh.FACEMESH_TESSELATION), dtype=np.int32
+            )
+            self._contour_edges = np.array(
+                sorted(self.mp_face_mesh.FACEMESH_CONTOURS), dtype=np.int32
+            )
+            self._iris_edges = np.array(
+                sorted(self.mp_face_mesh.FACEMESH_IRISES), dtype=np.int32
+            )
     
             # --- Παράμετροι Ποντικιού ---
             # Χρήση του screen_size() για ασφάλεια στις διαστάσεις
             self.screen_w, self.screen_h = screen_size()
             self.mouse_control_active = True 
 
-            # Head tracking is suspended while one of our own windows is focused
-            # so the user can actually hover/click the app's UI without the
-            # cursor being yanked away every frame.
-            self._app_has_focus = True
-            self._focus_token = 0
+            # Head tracking works over every window, including our own UI: the
+            # cursor still has to reach the app's buttons. Physical mouse
+            # movement temporarily takes over instead (see the override below).
+            # False when the user grabbed the mouse; refreshed on every physical
+            # movement so head tracking steps aside while they interact.
+            self._mouse_activity_seen = mouse_activity_count()
+            self._mouse_override_until = 0.0
 
             self.virtual_x, self.virtual_y = float(self.screen_w // 2), float(self.screen_h // 2)
     
@@ -1310,11 +1333,6 @@ class SmartControllerApp(ctk.CTk):
         TEXT_MUTED = "#6c7281"
 
         self.configure(fg_color=BG_MAIN)
-
-        # Track focus across every window of this app so head tracking can pause
-        # while the user is interacting with the UI (see _eval_app_focus).
-        self.bind_all("<FocusIn>", self._on_app_focus_in, add="+")
-        self.bind_all("<FocusOut>", self._on_app_focus_out, add="+")
 
         # ==========================================
         # 1. SIDEBAR (Αριστερή Πλευρά)
@@ -1528,25 +1546,32 @@ class SmartControllerApp(ctk.CTk):
         except Exception as e:
             print(f"⚠️ Αποτυχία αποθήκευσης ευαισθησίας: {e}")
 
-    def _on_app_focus_in(self, event=None):
-        self._focus_token += 1
-        self._app_has_focus = True
+    def _draw_face_overlay(self, frame, face_landmarks):
+        """Σχεδιάζει το πλέγμα του προσώπου πάνω στο frame.
 
-    def _on_app_focus_out(self, event=None):
-        # Focus bounces between widgets inside the app, so wait a moment and
-        # only flag "unfocused" if the focus really left this application.
-        self._focus_token += 1
-        token = self._focus_token
-        self.after(80, lambda t=token: self._eval_app_focus(t))
-
-    def _eval_app_focus(self, token):
-        if token != self._focus_token:
+        Τα σημεία προβάλλονται μία φορά σε pixel και κάθε σύνολο συνδέσεων
+        σχεδιάζεται με μία κλήση ``cv2.polylines``. Χωρίς antialiasing, γιατί
+        στο 640x480 η ομαλή γραμμή κοστίζει ~20ms/frame, ενώ έτσι ~3ms.
+        """
+        height, width = frame.shape[:2]
+        points = np.array(
+            [(lm.x * width, lm.y * height) for lm in face_landmarks.landmark],
+            dtype=np.int32,
+        )
+        if points.size == 0:
             return
-        try:
-            focused = self.focus_get()
-        except Exception:
-            focused = None
-        self._app_has_focus = focused is not None
+
+        cv2.polylines(
+            frame, points[self._mesh_edges], False, (0, 130, 140), 1, cv2.LINE_8
+        )
+        cv2.polylines(
+            frame, points[self._contour_edges], False, (0, 240, 255), 1, cv2.LINE_8
+        )
+        # Τα iris landmarks (469-477) υπάρχουν μόνο με refine_landmarks=True.
+        if points.shape[0] > int(self._iris_edges.max()):
+            cv2.polylines(
+                frame, points[self._iris_edges], False, (0, 240, 255), 1, cv2.LINE_8
+            )
 
     def update_video(self):
         if self.cap is None:
@@ -1563,6 +1588,11 @@ class SmartControllerApp(ctk.CTk):
 
             if results and results.multi_face_landmarks:
                 for face_landmarks in results.multi_face_landmarks:
+                    # Οπτική επιβεβαίωση ανίχνευσης, ανεξάρτητα από το αν η
+                    # κίνηση του ποντικιού είναι σε παύση.
+                    if getattr(self, 'show_face_mesh', True):
+                        self._draw_face_overlay(rgb_frame, face_landmarks)
+
                     # Needed by both the mouse-move branch and the mouth-click
                     # check below, so compute it before the branch.
                     sens_val = 1.0
@@ -1572,8 +1602,19 @@ class SmartControllerApp(ctk.CTk):
                         except Exception:
                             sens_val = 1.0
 
-                    if getattr(self, 'mouse_control_active', False) and not getattr(self, '_app_has_focus', False):
+                    if getattr(self, 'mouse_control_active', False):
                         current_time = time.time()
+
+                        # Αν ο χρήστης κουνήσει το πραγματικό ποντίκι, σταματάμε
+                        # προσωρινά το warp: αλλιώς κάθε καρέ θα τραβάει τον
+                        # δείκτη πίσω και δεν θα μπορεί να πατήσει τίποτα.
+                        activity = mouse_activity_count()
+                        if activity != self._mouse_activity_seen:
+                            self._mouse_activity_seen = activity
+                            self._mouse_override_until = (
+                                current_time + MOUSE_OVERRIDE_SECONDS
+                            )
+                        manual_override = current_time < self._mouse_override_until
 
                         # Landmarks
                         nose = face_landmarks.landmark[1]
@@ -1598,10 +1639,11 @@ class SmartControllerApp(ctk.CTk):
 
                         # 4. Υπολογισμός κίνησης X βάσει γέρσιματος (Roll)
                         if abs(roll_tilt) > deadzone_roll:
-                            # Το frame είναι οριζόντια flipped: όταν ο χρήστης
-                            # γέρνει αριστερά, το roll_tilt γίνεται θετικό, οπότε
-                            # το πρόσημο του X πρέπει να είναι αντίθετο.
-                            sign_x = -1 if roll_tilt > 0 else 1
+                            # Το frame είναι οριζόντια flipped, οπότε το
+                            # roll_tilt μεγαλώνει όταν ο χρήστης γέρνει
+                            # αριστερά· το πρόσημο αντιστρέφεται ώστε ο
+                            # δείκτης να ακολουθεί τη φυσική κατεύθυνση.
+                            sign_x = 1 if roll_tilt > 0 else -1
                             excess_x = abs(roll_tilt) - deadzone_roll
                             move_x = sign_x * (excess_x * 500 * sens_val)
 
@@ -1629,10 +1671,21 @@ class SmartControllerApp(ctk.CTk):
                         self.virtual_y = max(0, min(screen_h - 1, self.virtual_y))
 
                         # 8. Εκτέλεση κίνησης
-                        target_x = int(self.virtual_x)
-                        target_y = int(self.virtual_y)
-
-                        mouse_move(target_x, target_y)
+                        if manual_override:
+                            # Ο χρήστης έχει το ποντίκι. Δεν το τραβάμε πίσω·
+                            # απλώς ακολουθούμε τη θέση του, ώστε όταν αναλάβει
+                            # ξανά η ιχνηλάτηση να μην πηδήξει ο δείκτης.
+                            try:
+                                cur_x, cur_y = mouse_position()
+                                self.virtual_x = float(cur_x)
+                                self.virtual_y = float(cur_y)
+                            except Exception:
+                                pass
+                            cv2.putText(rgb_frame, "PAUSED (MOUSE OVERRIDE)", (10, 30), 0, 0.8, (0, 0, 255), 2)
+                        else:
+                            target_x = int(self.virtual_x)
+                            target_y = int(self.virtual_y)
+                            mouse_move(target_x, target_y)
                     else:
                         # Re-sync the virtual cursor to the real pointer so the
                         # mouse does not jump once tracking resumes.
@@ -1642,8 +1695,10 @@ class SmartControllerApp(ctk.CTk):
                             self.virtual_y = float(cur_y)
                         except Exception:
                             pass
-                        if not getattr(self, '_app_has_focus', False):
-                            cv2.putText(rgb_frame, "PAUSED (MOUSE OVERRIDE)", (10, 30), 0, 0.8, (0, 0, 255), 2)
+                        # Absorb any movement seen while paused, so returning to
+                        # tracking does not immediately trigger the override.
+                        self._mouse_activity_seen = mouse_activity_count()
+                        cv2.putText(rgb_frame, "PAUSED (TRACKING OFF)", (10, 30), 0, 0.8, (0, 0, 255), 2)
 
                     # Gestures
                     try:

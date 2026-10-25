@@ -1028,11 +1028,10 @@ the same suite also passes with `PYTHONPATH=HorusAccess`; `py_compile` is clean
 for `gui/main.py`, `database/db_manager.py` and `core/input_backend.py`. Two
 GUI smoke scripts (not part of the suite because they need a display) ran on
 `DISPLAY=:1`: one built the selector with five fake games while a fake Ollama
-call slept, one rendered two frames through `update_video()`, and one started
-the app against a temporary database with legacy key spellings. They confirmed
+call slept, and one rendered two frames through `update_video()`. They confirmed
 that detection, image loading and `ollama.chat()` run off the Tk thread, that
-the event loop keeps ticking during the LLM call, that video frames reuse one
-`PhotoImage`, and that the one-time key migration runs at startup.
+the event loop keeps ticking during the LLM call, and that video frames reuse
+one `PhotoImage`.
 
 **Product decision**
 
@@ -1057,9 +1056,9 @@ the event loop keeps ticking during the LLM call, that video frames reuse one
 | BUG-018 | `select_game()` only builds the prompt on the Tk thread. A daemon worker calls Ollama (including the primary-model fallback) and posts the validated mappings through a `queue.Queue`; `_process_ui_queue()` drains it with `after(50)`. A guard ignores repeated clicks while analysis is running. | GUI smoke: `ollama.chat()` ran on a non-main thread while the event loop processed >3 timer ticks; the confirmation dialog was created afterwards. |
 | BUG-019 | Removed `is_browser`, its prompt/instructions, allowed-key list and fallback mappings. The detector still rejects Chrome/Firefox/Edge/Opera as before. | `grep` shows no `is_browser`; detector tests unchanged. |
 | BUG-029 | `save_mapping()` and `update_mapping()` store `canonical_key(...)`; aliases are translated only in `input_backend` at injection. `migrate_legacy_key_aliases()` rewrites old rows once and is called at app startup under the same pattern as the threshold migration. | `test_save_mapping_canonicalises_key_aliases`, `test_update_mapping_canonicalises_key_aliases`, `test_legacy_key_aliases_are_migrated_once`. |
-| BUG-031 | The selector opens immediately with a loading label. Detection runs in a worker; cards are created on the Tk thread in small batches when results arrive. A second worker downloads images one by one, and each `CTkImage` is created on the Tk thread via the UI queue, replacing the card placeholder incrementally. Closing the window stops further UI callbacks. | GUI smoke: loading label → 5 cards, image placeholder replaced, window responsive throughout. |
+| BUG-031 | The selector opens immediately with a loading label. Detection runs in a worker; cards are created on the Tk thread when results arrive. A second worker downloads images one by one, and each `CTkImage` is created on the Tk thread via the UI queue, replacing the card placeholder incrementally. Closing the window stops further UI callbacks. | GUI smoke: loading label → 5 cards, image placeholder replaced, window responsive throughout. |
 | BUG-032 | `update_video()` keeps one `ImageTk.PhotoImage`; subsequent frames are written in place with `paste()`, resizing only if the camera frame size changes. This avoids both the per-frame `CTkImage` and the `ImageTk.PhotoImage` allocation that `CTkImage.configure()` would trigger. | GUI smoke: two `update_video()` calls kept the same `PhotoImage` object and label image. |
-| BUG-035 | Removed the listed items plus stale state found during re-checking: `is_recording_motion`, `recorded_landmarks`, `recorded_frames`, `mp_drawing`, `mp_drawing_styles`, `smooth_x/y`, all dwell state, `is_eyebrow_clicked`, `last_cursor_x/y`, `neutral_nose_x/y`, `deadzone_radius`, `mouse_pause_until`, write-only `last_injected_pos` (and a duplicate `mouse_position()` call it guarded), `get_all_widgets()`, `apply_magnetic_snap()`, `update_profile_settings()`, `click()`, `tap_key()` and the now-unused `math` import. The duplicate `ProfileReviewWindow` was already gone from batch 1. | `grep` for each symbol; `py_compile`; suite. |
+| BUG-035 | Removed the listed items plus stale state found during re-checking: `is_recording_motion`, `recorded_landmarks`, `recorded_frames`, `mp_drawing`, `mp_drawing_styles`, `smooth_x/y`, all dwell state, `is_eyebrow_clicked`, `last_cursor_x/y`, `neutral_nose_x/y`, `deadzone_radius`, `get_all_widgets()`, `apply_magnetic_snap()`, `update_profile_settings()`, `click()`, `tap_key()` and the now-unused `math` import. The duplicate `ProfileReviewWindow` was already gone from batch 1. | `grep` for each symbol; `py_compile`; suite. |
 
 **Manual verification still required**
 
