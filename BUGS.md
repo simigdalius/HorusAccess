@@ -1,9 +1,10 @@
 # HorusAccess — Known Issues / Bug Tracker
 
 Living document for the defects found during the code review of the current
-codebase. **Batch 1 (24 items) is implemented** — see
-[Appendix C — Batch 1 resolution log](#appendix-c--batch-1-resolution-log). The
-remaining 12 items are still findings waiting for a product decision or a
+codebase. **Batches 1 and 2 (30 items) are implemented** — see
+[Appendix C — Batch 1 resolution log](#appendix-c--batch-1-resolution-log) and
+[Appendix D — Batch 2 resolution log](#appendix-d--batch-2-resolution-log). The
+remaining 6 items are still findings waiting for a product decision or a
 separate change; the problem descriptions below stay in their pre-fix form so
 the original analysis remains readable.
 
@@ -30,15 +31,15 @@ the original analysis remains readable.
 
 | ID | Severity | Area | Short title | Status |
 | --- | --- | --- | --- | --- |
-| BUG-001 | S1 | gestures | Head motions can never trigger a key | open |
-| BUG-002 | S1 | gestures | `lips_pucker` UI action never matches the `kiss` metric | open |
-| BUG-003 | S1 | gestures | `eyebrows_frown` has no metric at all | open |
-| BUG-004 | S1 | gestures | Default threshold `0.05` makes 3 gestures permanently active and 5 never fire | open |
+| BUG-001 | S1 | gestures | Head motions can never trigger a key | fixed |
+| BUG-002 | S1 | gestures | `lips_pucker` UI action never matches the `kiss` metric | fixed |
+| BUG-003 | S1 | gestures | `eyebrows_frown` has no metric at all | fixed |
+| BUG-004 | S1 | gestures | Default threshold `0.05` makes 3 gestures permanently active and 5 never fire | fixed |
 | BUG-005 | S1 | gestures | Head-roll → mouse X axis is inverted | fixed |
 | BUG-006 | S1 | gestures | Pressed keys are never released (face lost / profile switch) | fixed |
 | BUG-007 | S2 | gui | `ProfileReviewWindow` is defined twice, second definition shadows the first | fixed |
-| BUG-008 | S2 | gui | `enable_edit` / `save_and_lock` reference widgets that are never created | open |
-| BUG-009 | S2 | gui | Editing keys/thresholds in the review window is not implemented | open |
+| BUG-008 | S2 | gui | `enable_edit` / `save_and_lock` reference widgets that are never created | fixed |
+| BUG-009 | S2 | gui | Editing keys/thresholds in the review window is not implemented | fixed |
 | BUG-010 | S3 | gui | Review-window header column does not align with the rows | fixed |
 | BUG-011 | S2 | db | Sensitivity slider value is never persisted | fixed |
 | BUG-012 | S2 | db | Game/app name is never stored or displayed | fixed |
@@ -67,7 +68,7 @@ the original analysis remains readable.
 | BUG-035 | S4 | gui | Dead code / unused state across the app | open |
 | BUG-036 | S3 | gui | "left_click must be mapped" invariant relies on exact string match | fixed |
 
-**Progress:** 24 fixed in batch 1 · 12 open (deferred — see
+**Progress:** 30 fixed (24 in batch 1 + 6 in batch 2) · 6 open (deferred — see
 [Appendix B](#appendix-b--suggested-fix-order)).
 
 ---
@@ -75,6 +76,8 @@ the original analysis remains readable.
 ## A. Gesture detection (`HorusAccess/gui/main.py`)
 
 ### BUG-001 · S1 · Head motions can never trigger a key
+
+**Status** `fixed` in batch 2 — see [Appendix D](#appendix-d--batch-2-resolution-log).
 
 **Location** `gui/main.py:1269-1295` (metric table + dispatcher), UI list
 `gui/main.py:693-696`, AI prompt `gui/main.py:193, 220, 229-232`, fallbacks
@@ -112,6 +115,8 @@ AI prompt/fallback so the app never advertises what it cannot do.
 
 ### BUG-002 · S1 · `lips_pucker` UI action never matches the `kiss` metric
 
+**Status** `fixed` in batch 2 — see [Appendix D](#appendix-d--batch-2-resolution-log).
+
 **Location** `gui/main.py:692` (UI stores `lips_pucker`), `gui/main.py:1275`
 (metric is named `kiss`), `gui/main.py:1271` (`smile` metric).
 
@@ -144,6 +149,8 @@ the upper/lower inner-lip distance), not a copy of the smile metric.
 
 ### BUG-003 · S1 · `eyebrows_frown` has no metric at all
 
+**Status** `fixed` in batch 2 — see [Appendix D](#appendix-d--batch-2-resolution-log).
+
 **Location** UI `gui/main.py:689`, AI `available_motions` `gui/main.py:193`,
 metric table `gui/main.py:1269-1280`.
 
@@ -156,6 +163,8 @@ inverse of the existing `eyebrows_up` measurement) or drop the action.
 ---
 
 ### BUG-004 · S1 · Default threshold `0.05` breaks every gesture
+
+**Status** `fixed` in batch 2 — see [Appendix D](#appendix-d--batch-2-resolution-log).
 
 **Location** schema default `database/db_manager.py:37`, dispatch logic
 `gui/main.py:1292-1295`, all `save_mapping` callers that omit `threshold`
@@ -272,6 +281,8 @@ and the two implementations disagree about behaviour.
 
 ### BUG-008 · S2 · `enable_edit` / `save_and_lock` reference non-existent widgets
 
+**Status** `fixed` in batch 2 — see [Appendix D](#appendix-d--batch-2-resolution-log).
+
 **Location** `gui/main.py:581-635`.
 
 **Problem**
@@ -291,6 +302,8 @@ methods (see BUG-009).
 ---
 
 ### BUG-009 · S2 · Editing keys/thresholds is not implemented
+
+**Status** `fixed` in batch 2 — see [Appendix D](#appendix-d--batch-2-resolution-log).
 
 **Location** `gui/main.py:495-579` (read-only rendering), README
 "Εμφάνιση Καταχωρημένων — review, **edit** or delete saved mappings".
@@ -833,27 +846,24 @@ pyautogui 0.9.54):
 
 ## Appendix B — Suggested fix order
 
-> Batch 1 already covered the first slice of every group and BUG-014: BUG-005/006,
-> BUG-011, BUG-015/016/017, BUG-007/010/012/013,
-> BUG-020/021/022/023/024/025/026, BUG-027/028 and BUG-030/033/034/036. What is
-> left, in the order it should be tackled:
+> Batch 1 covered the first slice of every group and BUG-014. Batch 2 closed the
+> gesture core (BUG-001/002/003/004) and the review-window edit UI
+> (BUG-008/009). What is left, in the order it should be tackled:
 
-1. **Gesture core** — BUG-001, BUG-002, BUG-003, BUG-004. They need a product
-   decision (which metrics and default thresholds the gestures should use) and
-   BUG-004 changes what BUG-009 has to expose, so the edit UI should follow them.
-2. **Responsiveness** — BUG-018 and BUG-031 (worker threads for detection,
+1. **Responsiveness** — BUG-018 and BUG-031 (worker threads for detection,
    images and Ollama), then BUG-032 (per-frame `CTkImage`).
-3. **Input completeness** — BUG-029 (canonical names in storage + migration);
+2. **Input completeness** — BUG-029 (canonical names in storage + migration);
    the `pyautogui-darwin` aliases still need a real macOS check.
-4. **Product question** — BUG-019 (keep or remove the browser branch).
-5. **Cleanup** — BUG-035, once BUG-009 lands.
+3. **Product question** — BUG-019 (keep or remove the browser branch).
+4. **Cleanup** — BUG-035, now that BUG-009 has landed.
 
 ## Appendix C — Batch 1 resolution log
 
-Implemented in the working tree (branch `refactor`, not committed yet).
-Verification: `.venv/bin/python -m unittest discover -s tests -v` → **44 tests,
-all passing**; `py_compile` clean for the five touched modules. Manual checks
-are listed at the end.
+Implemented on branch `refactor` and committed as `4b96e9f`
+(`fix: resolve first batch of 24 logic bugs`). Verification:
+`.venv/bin/python -m unittest discover -s tests -v` → **44 tests, all passing**;
+`py_compile` clean for the five touched modules. Manual checks are listed at
+the end.
 
 **Files**
 
@@ -900,7 +910,8 @@ are listed at the end.
 | BUG-034 | Selector stores its child dialog in `self._dialog` and registers `WM_DELETE_WINDOW → _on_close()`, which closes the child, releases the grab and destroys itself; the close button calls the same handler. The dialog clears `_dialog` when it closes. | Code review + close-with-dialog-open scenario (below). |
 | BUG-036 | Both invariant checks compare through `canonical_key()`, so `Left Click`, `left_click` and legacy spellings all count. | Code review; `canonical_key` tests. |
 
-**Deferred (unchanged)**
+**Deferred at the end of batch 1** (BUG-001/002/003/004/008/009 have since been
+closed by [Appendix D](#appendix-d--batch-2-resolution-log))
 
 - BUG-001/002/003/004 — need a product decision on head-gesture metrics and
   per-gesture thresholds; the fix also changes what users can map.
@@ -923,3 +934,74 @@ are listed at the end.
    window becomes clickable again.
 7. Check the review-window header alignment and the `Προφίλ N - <game>` title.
 8. macOS: pyautogui `command`/`option` mapping is untested here (no `Quartz`).
+
+## Appendix D — Batch 2 resolution log
+
+Implemented on branch `refactor` (not committed yet). Verification:
+`.venv/bin/python -m unittest discover -s tests` → **61 tests, all passing**;
+`py_compile` clean for the three touched application modules; plus a GUI smoke
+run that built both windows against a temporary database, migrated legacy
+thresholds, saved an edit, rejected an invalid threshold, exercised the
+left-click guard and built all 16 motion buttons. The smoke script is not part
+of the suite because it needs a display.
+
+**Product decisions**
+
+- Head gestures use a **calibrated neutral pose**: the first 30 tracked frames
+  are averaged, all four head metrics are deviations from that pose, and a
+  "🎯 Επαναφορά Κέντρου" button starts a new capture.
+- Existing profiles get a **one-time migration** of rows whose threshold is
+  exactly the old `0.05` default. User-edited values are preserved and a
+  `threshold_defaults_v2` settings flag prevents repeat migrations.
+
+**Files**
+
+- `HorusAccess/core/gestures.py` *(new)* — `GESTURES` registry (label, direction,
+  per-gesture default), legacy `kiss → lips_pucker` alias, facial metric
+  computation, head signals, `HeadPoseTracker` and the shared
+  `is_gesture_active()` dispatcher.
+- `HorusAccess/gui/main.py` — registry-driven motion/AI lists, head calibration
+  UI and dispatch, editable review window, per-gesture defaults on save.
+- `HorusAccess/database/db_manager.py` — `migrate_legacy_thresholds()` and the
+  `default_threshold` argument on `save_mapping()`.
+- `tests/test_gestures.py` *(new)* — registry, aliases, metric values, pucker
+  distinctness, head directions, calibration/reset.
+- `tests/test_db_manager.py` — per-gesture inserts and one-time migration.
+
+**Per bug**
+
+| Bug | Change | How it is checked |
+| --- | --- | --- |
+| BUG-001 | Head yaw/pitch/roll are normalised by face size and turned into `head_up/down/left/right` (plus `head_roll`) deviations from the captured neutral pose. Calibration returns zero metrics until complete. | `HeadPoseTests`; GUI smoke shows the reset control. |
+| BUG-002 | The canonical action is `lips_pucker`; legacy `kiss` rows are aliased to it in the registry, dispatcher and threshold migration. The pucker has its own shape metric (`outer lip height / lip width`), not the smile distance. | `test_legacy_kiss_is_the_pucker`, `test_pucker_is_not_a_copy_of_the_smile`, `test_smile_and_pucker_can_be_told_apart`. |
+| BUG-003 | `eyebrows_frown` is computed from the same brow-to-eye height as `eyebrows_up` but with the opposite direction, so it fires when the brows drop instead of being permanently open. | `test_metric_values`, `test_direction_of_each_gesture`. |
+| BUG-004 | Every gesture declares its own direction and default threshold in the registry. New mappings use that default, old exact-`0.05` rows are migrated once, and the review window lets the user tune each value. | DB tests, GUI smoke, `RegistryTests`. |
+| BUG-008 | Rows now populate `row_widgets`; `btn_lock` exists; `_apply_lock_state()` updates every row and button; `enable_edit()` focuses the row's threshold field. | GUI smoke: save → lock → unlock, widgets change state. |
+| BUG-009 | Each review row has a key dropdown, threshold entry, edit shortcut and delete button. `save_and_lock()` validates all rows before writing, accepts comma decimals, enforces `0 < threshold ≤ 1`, and refreshes the live dispatcher. | GUI smoke: edit persisted and invalid value rejected without a write. |
+
+**Related hardening**
+
+- The left-click invariant now only blocks removing/changing the *last*
+  `left_click` binding. Previously, deleting any row from a profile that never
+  had a click binding was refused, which also made the new edit UI unusable on
+  such profiles.
+- The motion picker, review window and AI prompt all derive their motion names
+  from the registry, so `nose_scrunch`, `cheek_puff` and `head_roll` are no
+  longer hidden capabilities.
+
+**Manual verification still required**
+
+1. Start tracking and keep the head neutral for ~0.5 s: the sidebar shows
+   "✅ Κέντρο κεφαλιού καταγράφηκε"; move only the head to check each direction
+   and the roll gesture, then press "Επαναφορά Κέντρου" and repeat.
+2. Check the new defaults in real lighting/camera distance, especially
+   `smile` (0.11), `lips_pucker` (0.28) and `eyebrows_frown` (0.022); tune them
+   in the review window if needed.
+3. Open a profile saved before this batch: its exact-`0.05` thresholds should
+   change to the per-gesture defaults once, while a deliberately edited value
+   stays.
+4. Review window: edit a key and a threshold, save/lock, unlock, delete a row,
+   and confirm the live key presses follow immediately.
+5. Try to change/delete the last `L. CLICK` mapping: it must warn, while a
+   profile without any click binding can still have its other rows edited and
+   deleted.

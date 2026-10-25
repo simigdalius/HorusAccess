@@ -86,6 +86,39 @@ class DBManagerTests(unittest.TestCase):
         self.assertEqual(self.db.get_last_profile(), 4)
         self.assertEqual(self.db.get_setting("missing", "fallback"), "fallback")
 
+    def test_new_mapping_can_use_a_per_gesture_default(self):
+        self.db.save_mapping(1, "smile", "s", default_threshold=0.105)
+        self.assertEqual(self.db.get_mappings(1)[0][3], 0.105)
+
+        self.db.save_mapping(1, "smile", "a")
+        self.assertEqual(self.db.get_mappings(1)[0][3], 0.105)
+
+    def test_legacy_thresholds_are_migrated_once(self):
+        defaults = {"mouth_open": 0.04, "smile": 0.105}
+        self.db.save_mapping(1, "mouth_open", "space", threshold=0.05)
+        self.db.save_mapping(1, "smile", "s", threshold=0.05)
+        self.db.save_mapping(2, "jaw_left", "a", threshold=0.2)
+
+        migrated = self.db.migrate_legacy_thresholds(defaults)
+        self.assertEqual(migrated, 2)
+
+        profile_1 = {row[1]: row[3] for row in self.db.get_mappings(1)}
+        profile_2 = {row[1]: row[3] for row in self.db.get_mappings(2)}
+        self.assertEqual(profile_1, {"mouth_open": 0.04, "smile": 0.105})
+        self.assertEqual(profile_2, {"jaw_left": 0.2})
+
+        # Το flag κρατά τη μεταφορά μία φορά.
+        self.db.save_mapping(2, "mouth_open", "space", threshold=0.05)
+        self.assertEqual(self.db.migrate_legacy_thresholds(defaults), 0)
+        profile_2 = {row[1]: row[3] for row in self.db.get_mappings(2)}
+        self.assertEqual(profile_2["mouth_open"], 0.05)
+
+    def test_legacy_threshold_migration_ignores_unknown_actions(self):
+        self.db.save_mapping(1, "teleport", "t", threshold=0.05)
+        migrated = self.db.migrate_legacy_thresholds({"mouth_open": 0.04})
+        self.assertEqual(migrated, 0)
+        self.assertEqual(self.db.get_mappings(1)[0][3], 0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

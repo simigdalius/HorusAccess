@@ -26,15 +26,58 @@ from core.input_backend import (
     disable_failsafe,
 )
 from core.keys import canonical_key
+from core.gestures import (
+    GESTURES,
+    HeadPoseTracker,
+    canonical_motion,
+    compute_facial_metrics,
+    default_threshold,
+    default_thresholds,
+    display_name,
+    is_gesture_active,
+    short_display_name,
+)
 from core.ui_utils import default_font_family
 from core.game_detector import detect_installed_games
 from database.db_manager import DBManager
 
 
-AVAILABLE_MOTIONS = [
-    "mouth_open", "smile", "left_eye_blink", "right_eye_blink",
-    "eyebrows_up", "eyebrows_frown", "head_up", "head_down", "head_left", "head_right",
+# Single source of truth for the gestures advertised to the user and the LLM.
+AVAILABLE_MOTIONS = list(GESTURES)
+
+KEYBOARD_LAYOUT = [
+    ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
+    ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
+    ["A", "S", "D", "F", "G", "H", "J", "K", "L", "enter"],
+    ["Z", "X", "C", "V", "B", "N", "M", "space", "up", "down"],
+    ["left", "right", "left_click", "right_click"],
 ]
+
+_KEY_LABELS = {
+    "enter": "ENTER",
+    "space": "SPACE",
+    "up": "UP",
+    "down": "DOWN",
+    "left": "LEFT",
+    "right": "RIGHT",
+    "left_click": "L. CLICK",
+    "right_click": "R. CLICK",
+}
+
+
+def key_label(key):
+    """Display spelling used by the key pickers and the review window."""
+    name = canonical_key(key)
+    if name is None:
+        return str(key).upper()
+    return _KEY_LABELS.get(name, name.upper())
+
+
+KEY_CHOICES = list(dict.fromkeys(
+    canonical_key(key) for row in KEYBOARD_LAYOUT for key in row
+))
+KEY_OPTION_LABELS = [key_label(key) for key in KEY_CHOICES]
+KEY_BY_LABEL = {key_label(key): key for key in KEY_CHOICES}
 
 
 def _validate_mappings(items, allowed_keys):
@@ -443,7 +486,8 @@ Respond STRICTLY with a valid JSON object matching this schema:
                     self.parent.db.save_mapping(
                         profile_id=target_profile,
                         action=motion,
-                        mapped_key=key
+                        mapped_key=key,
+                        default_threshold=default_threshold(motion),
                     )
                 
                 # 2. Αποθήκευση του ονόματος της εφαρμογής για το προφίλ
@@ -486,7 +530,7 @@ class ProfileReviewWindow(ctk.CTkToplevel):
         self.db = db
 
         self.title(f"Εμφάνιση & Επεξεργασία Καταχωρημένων (Προφίλ {self.profile_id})")
-        self.geometry("750x550")
+        self.geometry("880x600")
         self.attributes("-topmost", True)
 
         self.row_widgets = {} 
@@ -517,24 +561,37 @@ class ProfileReviewWindow(ctk.CTkToplevel):
         self.scroll_frame = ctk.CTkScrollableFrame(self, width=720, height=380)
         self.scroll_frame.pack(pady=10, padx=20, fill="both", expand=True)
 
-        # 4. ΜΕΓΑΛΟ ΚΟΥΜΠΙ ΚΛΕΙΣΙΜΟΥ (Large Close Target)
+        # 4. Αποθήκευση / κλείδωμα των αλλαγών
+        self.btn_lock = ctk.CTkButton(
+            self,
+            text="💾 Αποθήκευση & Κλείδωμα",
+            font=ctk.CTkFont(size=17, weight="bold"),
+            height=44,
+            fg_color="#27ae60",
+            hover_color="#2ecc71",
+            corner_radius=10,
+            command=self.save_and_lock
+        )
+        self.btn_lock.pack(pady=(8, 6), padx=30, fill="x")
+
+        # 5. ΜΕΓΑΛΟ ΚΟΥΜΠΙ ΚΛΕΙΣΙΜΟΥ (Large Close Target)
         self.close_btn = ctk.CTkButton(
             self,
             text="❌ ΚΛΕΙΣΙΜΟ",
             font=ctk.CTkFont(size=20, weight="bold"),
-            height=55,                  # Μεγάλο ύψος για εύκολο στόχο
+            height=50,                  # Μεγάλο ύψος για εύκολο στόχο
             fg_color="#c0392b",
             hover_color="#e74c3c",
             corner_radius=12,
             command=self.destroy        # Κλείνει το παράθυρο/frame
         )
-        self.close_btn.pack(pady=15, padx=30, fill="x")
+        self.close_btn.pack(pady=(0, 12), padx=30, fill="x")
 
     
 
     def load_data(self):
-        """Φορτώνει τα mappings σε 3 στήλες: 
-        Είδος Κίνησης | Πλήκτρο | Διαγραφή
+        """Φορτώνει τα mappings σε 4 στήλες:
+        Είδος Κίνησης | Πλήκτρο | Όριο | Ενέργειες
         """
         for widget in self.scroll_frame.winfo_children():
             widget.destroy()
@@ -549,90 +606,147 @@ class ProfileReviewWindow(ctk.CTkToplevel):
                 font=ui_font(size=14),
                 text_color="#6c7281"
             ).pack(pady=40)
+            self._apply_lock_state()
             return
 
-        motion_names = {
-            "mouth_open": "Στόμα Ανοιχτό 😮",
-            "smile": "Χαμόγελο 😊",
-            "left_eye_blink": "Αριστερό Βλέφαρο 👁️",
-            "right_eye_blink": "Δεξί Βλέφαρο 👁️",
-            "eyebrows_up": "Φρύδια Πάνω 😲",
-            "eyebrows_frown": "Συνοφρύωση 😠",
-            "jaw_left": "Σαγόνι Αριστερά 👈",
-            "jaw_right": "Σαγόνι Δεξιά 👉",
-            "lips_pucker": "Χείλη Μπροστά (O) 😗",
-            "head_up": "Κεφάλι Πάνω ⬆️",
-            "head_down": "Κεφάλι Κάτω ⬇️",
-            "head_left": "Κεφάλι Αριστερά ⬅️",
-            "head_right": "Κεφάλι Δεξιά ➡️",
-            "head_roll": "Κλίση Κεφαλιού 🔄"
-        }
-
-        # Header 3 Στηλών
+        # Header 4 Στηλών — ίδιες θέσεις/βάρη με τις γραμμές.
         header_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#1f2128", height=35, corner_radius=6)
         header_frame.pack(fill="x", pady=(0, 8), padx=5)
 
-        header_frame.grid_columnconfigure(0, weight=3)  # Είδος Κίνησης
+        header_frame.grid_columnconfigure(0, weight=4)  # Είδος Κίνησης
         header_frame.grid_columnconfigure(1, weight=2)  # Πλήκτρο
-        header_frame.grid_columnconfigure(2, weight=1)  # Ενέργεια
+        header_frame.grid_columnconfigure(2, weight=2)  # Όριο
+        header_frame.grid_columnconfigure(3, weight=2)  # Ενέργειες
 
         ctk.CTkLabel(header_frame, text="Είδος Κίνησης", font=ctk.CTkFont(size=12, weight="bold"), text_color="#a0a5b5").grid(row=0, column=0, sticky="w", padx=12, pady=5)
         ctk.CTkLabel(header_frame, text="Πλήκτρο", font=ctk.CTkFont(size=12, weight="bold"), text_color="#a0a5b5").grid(row=0, column=1, sticky="w", padx=8, pady=5)
-        ctk.CTkLabel(header_frame, text="Ενέργεια", font=ctk.CTkFont(size=12, weight="bold"), text_color="#a0a5b5").grid(row=0, column=2, padx=8, pady=5)
+        ctk.CTkLabel(header_frame, text="Όριο (> / <)", font=ctk.CTkFont(size=12, weight="bold"), text_color="#a0a5b5").grid(row=0, column=2, sticky="w", padx=8, pady=5)
+        ctk.CTkLabel(header_frame, text="Ενέργειες", font=ctk.CTkFont(size=12, weight="bold"), text_color="#a0a5b5").grid(row=0, column=3, padx=8, pady=5)
 
         # Εγγραφές
         for item in mappings:
-            m_id = item[0] if isinstance(item, (tuple, list)) else item.get('id')
-            motion = item[1] if isinstance(item, (tuple, list)) else item.get('action')
-            key = item[2] if isinstance(item, (tuple, list)) else item.get('mapped_key')
+            m_id, motion, key, threshold = item
 
             row = ctk.CTkFrame(self.scroll_frame, fg_color="#181a20", corner_radius=8)
             row.pack(fill="x", pady=3, padx=5)
 
-            row.grid_columnconfigure(0, weight=3)
+            row.grid_columnconfigure(0, weight=4)
             row.grid_columnconfigure(1, weight=2)
-            row.grid_columnconfigure(2, weight=1)
+            row.grid_columnconfigure(2, weight=2)
+            row.grid_columnconfigure(3, weight=2)
+
+            default = default_threshold(motion)
+            if threshold is None:
+                threshold = default if default is not None else 0.05
 
             # 1. Είδος Κίνησης
             ctk.CTkLabel(
-                row, text=motion_names.get(motion, motion),
+                row, text=display_name(motion),
                 font=ctk.CTkFont(size=13, weight="bold"), text_color="#ffffff"
             ).grid(row=0, column=0, sticky="w", padx=12, pady=6)
 
             # 2. Πλήκτρο
-            key_badge = ctk.CTkButton(
-                row, text=str(key).upper(),
+            current_label = key_label(key)
+            key_values = list(KEY_OPTION_LABELS)
+            if current_label not in key_values:
+                key_values.append(current_label)
+            key_dropdown = ctk.CTkOptionMenu(
+                row,
+                values=key_values,
                 font=ctk.CTkFont(size=11, weight="bold"),
                 fg_color="#00f0ff", text_color="#111215",
-                hover=False, width=70, height=24, corner_radius=5
+                button_color="#00b8c4", button_hover_color="#00f0ff",
+                dropdown_fg_color="#1f2128", dropdown_text_color="#ffffff",
+                width=110, height=28, corner_radius=5,
             )
-            key_badge.grid(row=0, column=1, sticky="w", padx=8, pady=6)
+            key_dropdown.set(current_label)
+            key_dropdown.grid(row=0, column=1, sticky="w", padx=8, pady=6)
 
-            # 3. Διαγραφή
+            # 3. Όριο
+            thresh_entry = ctk.CTkEntry(
+                row,
+                width=90, height=28,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="#111215", border_color="#262932",
+                placeholder_text=f"{default:.3f}" if default is not None else "0.050",
+            )
+            thresh_entry.insert(0, f"{float(threshold):.3f}")
+            thresh_entry.grid(row=0, column=2, sticky="w", padx=8, pady=6)
+
+            # 4. Ενέργειες
+            actions = ctk.CTkFrame(row, fg_color="transparent")
+            actions.grid(row=0, column=3, padx=8, pady=4)
+
+            edit_btn = ctk.CTkButton(
+                actions, text="✏️",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color="#f39c12", hover_color="#f1c40f", text_color="#111215",
+                width=32, height=26, corner_radius=5,
+                command=lambda mid=m_id: self.enable_edit(mid)
+            )
+            edit_btn.pack(side="left", padx=(0, 4))
+
             del_btn = ctk.CTkButton(
-                row, text="🗑️ Διαγραφή",
+                actions, text="🗑️",
                 font=ctk.CTkFont(size=11, weight="bold"),
                 fg_color="#ff4757", hover_color="#ff6b81", text_color="#ffffff",
-                width=80, height=26, corner_radius=5,
+                width=32, height=26, corner_radius=5,
                 command=lambda mid=m_id: self.delete_entry(mid)
             )
-            del_btn.grid(row=0, column=2, padx=8, pady=6)
+            del_btn.pack(side="left")
+
+            self.row_widgets[m_id] = {
+                "key_dropdown": key_dropdown,
+                "thresh_entry": thresh_entry,
+                "btn_edit": edit_btn,
+                "btn_delete": del_btn,
+            }
+
+        self._apply_lock_state()
+
+    def _apply_lock_state(self):
+        """Ενεργοποιεί ή κλειδώνει όλα τα widgets των γραμμών."""
+        state = "disabled" if self.is_locked else "normal"
+        for widgets in self.row_widgets.values():
+            widgets["key_dropdown"].configure(state=state)
+            widgets["thresh_entry"].configure(state=state)
+            widgets["btn_edit"].configure(state=state)
+            widgets["btn_delete"].configure(state=state)
+
+        if not hasattr(self, "btn_lock"):
+            return
+        if self.is_locked:
+            self.btn_lock.configure(
+                text="🔓 Ξεκλείδωμα",
+                fg_color="#c0392b",
+                hover_color="#e74c3c",
+            )
+        else:
+            self.btn_lock.configure(
+                text="💾 Αποθήκευση & Κλείδωμα",
+                fg_color="#27ae60",
+                hover_color="#2ecc71",
+            )
 
     def enable_edit(self, mapping_id):
         if self.is_locked:
             return
-            
-        widgets = self.row_widgets[mapping_id]
+
+        widgets = self.row_widgets.get(mapping_id)
+        if widgets is None:
+            return
         widgets["key_dropdown"].configure(state="normal")
         widgets["thresh_entry"].configure(state="normal")
-        widgets["btn_edit"].configure(text="Ενεργό", fg_color="gray", state="disabled")
+        widgets["thresh_entry"].focus_set()
 
     def delete_entry(self, mapping_id):
         if self.is_locked:
             return
 
-        remaining = [row for row in self.db.get_mappings(self.profile_id) if row[0] != mapping_id]
-        if not any(canonical_key(row[2]) == "left_click" for row in remaining):
+        current = {row[0]: row[2] for row in self.db.get_mappings(self.profile_id)}
+        remaining = [key for mid, key in current.items() if mid != mapping_id]
+        deleting_click = canonical_key(current.get(mapping_id)) == "left_click"
+        if deleting_click and not any(canonical_key(key) == "left_click" for key in remaining):
             messagebox.showwarning(
                 "Απαιτείται Κλικ",
                 "Το αριστερό κλικ (L. CLICK) πρέπει να έχει πάντα μια κίνηση.\n\n"
@@ -649,28 +763,64 @@ class ProfileReviewWindow(ctk.CTkToplevel):
     def save_and_lock(self):
         if self.is_locked:
             self.is_locked = False
-            self.btn_lock.configure(text="Αποθήκευση & Κλείδωμα", fg_color="#27ae60", hover_color="#2ecc71")
-            for w in self.row_widgets.values():
-                w["btn_edit"].configure(state="normal", text="Επεξεργασία", fg_color="#f39c12")
-                w["btn_delete"].configure(state="normal")
+            self._apply_lock_state()
             return
 
+        # Ελέγχουμε πρώτα όλες τις γραμμές, ώστε ένα λάθος να μην αφήσει τη
+        # βάση μισοενημερωμένη.
+        current = {row[0]: row[2] for row in self.db.get_mappings(self.profile_id)}
+        updates = []
         for m_id, widgets in self.row_widgets.items():
-            new_key = widgets["key_dropdown"].get()
-            try:
-                new_thresh = float(widgets["thresh_entry"].get())
-            except ValueError:
-                new_thresh = 0.05
+            label = widgets["key_dropdown"].get()
+            new_key = KEY_BY_LABEL.get(label, canonical_key(label))
+            if not new_key:
+                messagebox.showwarning(
+                    "Μη έγκυρο πλήκτρο",
+                    f"Το πλήκτρο «{label}» δεν αναγνωρίζεται.",
+                    parent=self,
+                )
+                return
 
+            raw_threshold = widgets["thresh_entry"].get().strip().replace(",", ".")
+            try:
+                new_thresh = float(raw_threshold)
+            except ValueError:
+                messagebox.showwarning(
+                    "Μη έγκυρο όριο",
+                    f"Το όριο «{raw_threshold}» δεν είναι αριθμός.",
+                    parent=self,
+                )
+                return
+            if not 0.0 < new_thresh <= 1.0:
+                messagebox.showwarning(
+                    "Μη έγκυρο όριο",
+                    "Το όριο πρέπει να είναι μεταξύ 0 και 1 (π.χ. 0.105).",
+                    parent=self,
+                )
+                return
+
+            updates.append((m_id, new_key, new_thresh))
+
+        pending = dict(current)
+        for m_id, new_key, _ in updates:
+            pending[m_id] = new_key
+        if (
+            any(canonical_key(key) == "left_click" for key in current.values())
+            and not any(canonical_key(key) == "left_click" for key in pending.values())
+        ):
+            messagebox.showwarning(
+                "Απαιτείται Κλικ",
+                "Το αριστερό κλικ (L. CLICK) πρέπει να έχει πάντα μια κίνηση.\n\n"
+                "Όρισε πρώτα άλλη κίνηση για το L. CLICK.",
+                parent=self,
+            )
+            return
+
+        for m_id, new_key, new_thresh in updates:
             self.db.update_mapping(m_id, new_key, new_thresh)
-            
-            widgets["key_dropdown"].configure(state="disabled")
-            widgets["thresh_entry"].configure(state="disabled")
-            widgets["btn_edit"].configure(state="disabled")
-            widgets["btn_delete"].configure(state="disabled")
 
         self.is_locked = True
-        self.btn_lock.configure(text="🔒 ΚΛΕΙΔΩΜΕΝΟ (Πατήστε για ξεκλείδωμα)", fg_color="#c0392b", hover_color="#e74c3c")
+        self._apply_lock_state()
         self.parent.refresh_active_mappings()
         print("Το προφίλ αποθηκεύτηκε και κλειδώθηκε.")
 
@@ -721,20 +871,7 @@ class MotionInputWindow(ctk.CTkToplevel):
         motion_grid.grid_columnconfigure((0, 1), weight=1)
         
         facial_motions = [
-            ("Στόμα Ανοιχτό", "mouth_open"),
-            ("Χαμόγελο", "smile"),
-            ("Αριστερό Βλέφαρο", "left_eye_blink"),
-            ("Δεξί Βλέφαρο", "right_eye_blink"),
-            ("Φρύδια Πάνω", "eyebrows_up"),
-            ("Συνοφρύωση", "eyebrows_frown"),
-            ("Σαγόνι Αριστερά", "jaw_left"),
-            ("Σαγόνι Δεξιά", "jaw_right"),
-            ("Χείλη Μπροστά (O)", "lips_pucker"),
-            ("Κεφάλι Πάνω", "head_up"),
-            ("Κεφάλι Κάτω", "head_down"),
-            ("Κεφάλι Αριστερά", "head_left"),
-            ("Κεφάλι Δεξιά", "head_right"),
-            ("Κλίση Κεφαλιού", "head_roll")
+            (short_display_name(name), name) for name in GESTURES
         ]
 
         for index, (label_text, motion_id) in enumerate(facial_motions):
@@ -766,23 +903,13 @@ class MotionInputWindow(ctk.CTkToplevel):
         keyboard_grid = ctk.CTkFrame(right_frame, fg_color="transparent")
         keyboard_grid.pack(fill="both", expand=True)
 
-        keyboard_layout = [
-            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
-            ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
-            ["A", "S", "D", "F", "G", "H", "J", "K", "L", "enter"],
-            ["Z", "X", "C", "V", "B", "N", "M", "space", "up", "down"],
-            ["left", "right", "left_click", "right_click"]
-        ]
-
-        for row_idx, row_keys in enumerate(keyboard_layout):
+        for row_keys in KEYBOARD_LAYOUT:
             row_frame = ctk.CTkFrame(keyboard_grid, fg_color="transparent")
             row_frame.pack(fill="x", pady=4)
             
             for key in row_keys:
                 btn_width = 80 if key in ["space", "enter", "left_click", "right_click"] else 46
-                display_text = key.upper()
-                if key == "left_click": display_text = "L. CLICK"
-                if key == "right_click": display_text = "R. CLICK"
+                display_text = key_label(key)
 
                 btn = ctk.CTkButton(
                     row_frame,
@@ -876,7 +1003,8 @@ class MotionInputWindow(ctk.CTkToplevel):
             self.db.save_mapping(
                 profile_id=clean_id,
                 action=self.selected_motion,
-                mapped_key=self.selected_key
+                mapped_key=self.selected_key,
+                default_threshold=default_threshold(self.selected_motion),
             )
             print(f"✅ Επιτυχής καταχώρηση στη βάση (Προφίλ: {clean_id})!")
 
@@ -936,7 +1064,11 @@ class SmartControllerApp(ctk.CTk):
         self.active_mappings.clear()
         
         for m_id, action, key, threshold in mappings:
-            self.active_mappings[action] = {"key": key, "threshold": threshold}
+            canonical = canonical_motion(action)
+            if canonical is None:
+                print(f"⚠️ Παράλειψη άγνωστης κίνησης στη βάση: {action}")
+                continue
+            self.active_mappings[canonical] = {"key": key, "threshold": threshold}
             
         print(f"Ενεργά Mappings ανανεώθηκαν: {self.active_mappings}")
 
@@ -957,6 +1089,18 @@ class SmartControllerApp(ctk.CTk):
     
             self.db = DBManager()
             self.current_profile_id = self.db.get_last_profile()
+
+            # Μία φορά: αντικαθιστούμε το παλιό ενιαίο 0.05 με τα όρια ανά κίνηση.
+            try:
+                migrated = self.db.migrate_legacy_thresholds(default_thresholds())
+                if migrated:
+                    print(f"🔧 Μεταφέρθηκαν {migrated} παλιά όρια κινήσεων.")
+            except Exception as e:
+                print(f"⚠️ Αποτυχία μεταφοράς παλιών ορίων: {e}")
+
+            # Η ουδέτερη στάση κεφαλιού καταγράφεται μόλις ξεκινήσει η κάμερα.
+            self.head_tracker = HeadPoseTracker()
+            self._head_was_calibrated = False
             
             # --- MediaPipe Setup ---
             self.mp_face_mesh = mp.solutions.face_mesh
@@ -1096,7 +1240,33 @@ class SmartControllerApp(ctk.CTk):
         self.sens_slider.pack(pady=10, padx=20, fill="x")
         
         self.sens_value_label = ctk.CTkLabel(self.sidebar, text="1.0", font=font_main, text_color=MODERN_GREEN)
-        self.sens_value_label.pack(pady=(0, 20))
+        self.sens_value_label.pack(pady=(0, 12))
+
+        # --- Κέντρο Κεφαλιού ---
+        ctk.CTkLabel(self.sidebar, text="Κέντρο Κεφαλιού", font=font_main, text_color=TEXT_WHITE).pack(pady=(4, 5), anchor="w", padx=25)
+
+        self.head_status_label = ctk.CTkLabel(
+            self.sidebar,
+            text="⏳ Μέτρηση ουδέτερης στάσης...",
+            font=ui_font(size=12),
+            text_color=TEXT_MUTED,
+        )
+        self.head_status_label.pack(pady=(0, 5), padx=25, anchor="w")
+
+        self.btn_head_reset = ctk.CTkButton(
+            self.sidebar,
+            text="🎯 Επαναφορά Κέντρου",
+            font=ui_font(size=13, weight="bold"),
+            height=36,
+            corner_radius=10,
+            fg_color="transparent",
+            border_color=MODERN_GREEN,
+            border_width=2,
+            text_color=MODERN_GREEN,
+            hover_color="#004d33",
+            command=self.reset_head_center,
+        )
+        self.btn_head_reset.pack(pady=(0, 12), padx=20, fill="x")
 
         # --- Κουμπί 1: Εισαγωγή Κίνησης ---
         self.btn_add_motion = ctk.CTkButton(
@@ -1188,6 +1358,19 @@ class SmartControllerApp(ctk.CTk):
         print(f"--- Αλλαγή σε Προφίλ {self.current_profile_id} ---")
         self.refresh_active_mappings()
         self.load_profile_data(self.current_profile_id)
+
+    def reset_head_center(self):
+        """Ξεκινά νέα μέτρηση της ουδέτερης στάσης κεφαλιού."""
+        if not hasattr(self, "head_tracker"):
+            return
+        self.head_tracker.reset()
+        self._head_was_calibrated = False
+        if hasattr(self, "head_status_label"):
+            self.head_status_label.configure(
+                text="⏳ Μέτρηση ουδέτερης στάσης...",
+                text_color="#6c7281",
+            )
+        print("🎯 Νέο κέντρο κεφαλιού: κρατήστε το κεφάλι σε ουδέτερη στάση.")
 
     def load_profile_data(self, profile_id):
         profiles = self.db.get_all_profiles()
@@ -1343,18 +1526,22 @@ class SmartControllerApp(ctk.CTk):
                     # Gestures
                     try:
                         landmarks = face_landmarks.landmark
-                        current_metrics = {
-                            "mouth_open": math.hypot(landmarks[13].x - landmarks[14].x, landmarks[13].y - landmarks[14].y),
-                            "smile": math.hypot(landmarks[61].x - landmarks[291].x, landmarks[61].y - landmarks[291].y),
-                            "eyebrows_up": (math.hypot(landmarks[105].x - landmarks[159].x, landmarks[105].y - landmarks[159].y) + math.hypot(landmarks[336].x - landmarks[386].x, landmarks[336].y - landmarks[386].y)) / 2,
-                            "left_eye_blink": math.hypot(landmarks[159].x - landmarks[145].x, landmarks[159].y - landmarks[145].y),
-                            "right_eye_blink": math.hypot(landmarks[386].x - landmarks[374].x, landmarks[386].y - landmarks[374].y),
-                            "kiss": math.hypot(landmarks[61].x - landmarks[291].x, landmarks[61].y - landmarks[291].y),
-                            "jaw_left": math.hypot(landmarks[152].x - landmarks[132].x, landmarks[152].y - landmarks[132].y),
-                            "jaw_right": math.hypot(landmarks[152].x - landmarks[361].x, landmarks[152].y - landmarks[361].y),
-                            "nose_scrunch": math.hypot(landmarks[1].x - landmarks[13].x, landmarks[1].y - landmarks[13].y),
-                            "cheek_puff": math.hypot(landmarks[50].x - landmarks[280].x, landmarks[50].y - landmarks[280].y)
-                        }
+                        current_metrics = compute_facial_metrics(landmarks)
+                        current_metrics.update(self.head_tracker.update(landmarks))
+
+                        if self.head_tracker.is_calibrated != self._head_was_calibrated:
+                            self._head_was_calibrated = self.head_tracker.is_calibrated
+                            if self._head_was_calibrated:
+                                self.head_status_label.configure(
+                                    text="✅ Κέντρο κεφαλιού καταγράφηκε",
+                                    text_color="#00ffaa",
+                                )
+                                print("✅ Καταγράφηκε το κέντρο κεφαλιού.")
+                            else:
+                                self.head_status_label.configure(
+                                    text="⏳ Μέτρηση ουδέτερης στάσης...",
+                                    text_color="#6c7281",
+                                )
 
                         active_mappings = getattr(self, 'active_mappings', {})
                         pressed_keys = getattr(self, 'pressed_keys', set())
@@ -1365,21 +1552,17 @@ class SmartControllerApp(ctk.CTk):
                         desired_keys = set()
                         for action, data in active_mappings.items():
                             target_key = canonical_key(data.get("key"))
+                            action = canonical_motion(action)
                             threshold = data.get("threshold")
 
-                            if not target_key or action not in current_metrics:
+                            if not target_key or action is None:
                                 continue
                             if threshold is None:
-                                threshold = 0.05
+                                threshold = default_threshold(action)
 
-                            if action in ["mouth_open", "smile", "eyebrows_up", "cheek_puff"]:
-                                is_active = current_metrics[action] > threshold
-                            elif action in ["left_eye_blink", "right_eye_blink", "kiss", "jaw_left", "jaw_right", "nose_scrunch"]:
-                                is_active = current_metrics[action] < threshold
-                            else:
-                                is_active = False
-
-                            if is_active:
+                            if is_gesture_active(
+                                action, current_metrics.get(action), threshold
+                            ):
                                 desired_keys.add(target_key)
 
                         for target_key in sorted(desired_keys - pressed_keys):

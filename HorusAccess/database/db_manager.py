@@ -127,22 +127,26 @@ class DBManager:
         return name
 
     # --- ΜΕΘΟΔΟΙ ΓΙΑ ΤΑ MAPPINGS ---
-    def save_mapping(self, profile_id: int, action: str, mapped_key: str, threshold=None):
+    def save_mapping(self, profile_id: int, action: str, mapped_key: str,
+                     threshold=None, default_threshold=0.05):
         """Αποθηκεύει τη νέα κίνηση και το όριό της.
 
-        Το ``threshold=None`` διατηρεί την υπάρχουσα τιμή (και χρησιμοποιεί
-        0.05 για νέες εγγραφές), ώστε μια αλλαγή πλήκτρου να μη μηδενίζει την
-        ευαισθησία που είχε ορίσει ο χρήστης.
+        Το ``threshold=None`` διατηρεί την υπάρχουσα τιμή, ώστε μια αλλαγή
+        πλήκτρου να μη μηδενίζει την ευαισθησία που είχε ορίσει ο χρήστης. Για
+        νέα εγγραφή χρησιμοποιείται το ``default_threshold`` (ο καλών περνά το
+        προεπιλεγμένο όριο της συγκεκριμένης κίνησης· το 0.05 μένει ως
+        συμβατό fallback).
         """
         with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO mappings (profile_id, action, mapped_key, threshold)
-                VALUES (?, ?, ?, COALESCE(?, 0.05))
+                VALUES (?, ?, ?, COALESCE(?, ?))
                 ON CONFLICT(profile_id, action) DO UPDATE SET
                     mapped_key = excluded.mapped_key,
-                    threshold = COALESCE(?, mappings.threshold, 0.05)
-            ''', (profile_id, action, mapped_key, threshold, threshold))
+                    threshold = COALESCE(?, mappings.threshold, ?)
+            ''', (profile_id, action, mapped_key, threshold,
+                  default_threshold, threshold, default_threshold))
 
     def get_mappings(self, profile_id: int):
         """Επιστρέφει τις κινήσεις του προφίλ: (id, action, mapped_key, threshold)."""
@@ -170,6 +174,44 @@ class DBManager:
         with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM mappings WHERE id = ?', (mapping_id,))
+
+    def migrate_legacy_thresholds(self, defaults, legacy_value=0.05,
+                                  setting_key="threshold_defaults_v2"):
+        """Αντικαθιστά μία φορά το παλιό ενιαίο όριο με τα όρια ανά κίνηση.
+
+        Αλλάζονται μόνο οι εγγραφές που έχουν ακριβώς την παλιά προεπιλογή
+        (``legacy_value``), άρα οι τιμές που έχει πειράξει ο χρήστης μένουν
+        ανέπαφες. Επιστρέφει το πλήθος των εγγραφών που ενημερώθηκαν.
+        """
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM settings WHERE key = ?", (setting_key,))
+            row = cursor.fetchone()
+            if row and str(row[0]) == "1":
+                return 0
+
+            cursor.execute(
+                "SELECT id, action FROM mappings WHERE ABS(threshold - ?) < 1e-9",
+                (float(legacy_value),),
+            )
+            updates = []
+            for mapping_id, action in cursor.fetchall():
+                new_threshold = defaults.get(action)
+                if new_threshold is None:
+                    continue
+                updates.append((float(new_threshold), mapping_id))
+
+            if updates:
+                cursor.executemany(
+                    "UPDATE mappings SET threshold = ? WHERE id = ?",
+                    updates,
+                )
+
+            cursor.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (setting_key, "1"),
+            )
+            return len(updates)
 
     # --- ΜΕΘΟΔΟΙ ΓΙΑ ΤΙΣ ΡΥΘΜΙΣΕΙΣ ---
     def get_setting(self, key: str, default=None):
