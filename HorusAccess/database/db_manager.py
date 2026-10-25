@@ -1,5 +1,7 @@
+import contextlib
 import sqlite3
 import os
+
 
 class DBManager:
     def __init__(self, db_name="smart_controller.db"):
@@ -13,9 +15,22 @@ class DBManager:
         """Επιστρέφει μια νέα σύνδεση στη βάση."""
         return sqlite3.connect(self.db_path)
 
+    @contextlib.contextmanager
+    def _connection(self):
+        """Σύνδεση που κάνει commit/rollback και κλείνει πάντα στο τέλος."""
+        conn = self._get_connection()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _create_tables(self):
         """Δημιουργεί τους πίνακες με ενσωματωμένο το threshold."""
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             
             # Πίνακας Προφίλ
@@ -47,10 +62,9 @@ class DBManager:
                     value TEXT
                 )
             ''')
-            conn.commit()
 
     def _initialize_profiles(self):
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM profiles")
             if cursor.fetchone()[0] == 0:
@@ -59,36 +73,80 @@ class DBManager:
                     INSERT INTO profiles (id, name, sensitivity)
                     VALUES (?, ?, ?)
                 ''', profiles_data)
-                conn.commit()
 
     # --- ΜΕΘΟΔΟΙ ΓΙΑ ΤΑ ΠΡΟΦΙΛ ---
     def get_all_profiles(self):
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT id, name, sensitivity FROM profiles ORDER BY id")
             return cursor.fetchall()
 
     def update_profile_settings(self, profile_id: int, name: str, sensitivity: float):
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute('UPDATE profiles SET name = ?, sensitivity = ? WHERE id = ?', 
                            (name, sensitivity, profile_id))
-            conn.commit()
+
+    def update_profile_sensitivity(self, profile_id: int, sensitivity: float):
+        """Αποθηκεύει μόνο την ευαισθησία του προφίλ."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE profiles SET sensitivity = ? WHERE id = ?',
+                (float(sensitivity), profile_id),
+            )
+
+    def update_profile_name(self, profile_id: int, name: str):
+        """Αποθηκεύει το όνομα παιχνιδιού/εφαρμογής που αντιστοιχεί στο προφίλ."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE profiles SET name = ? WHERE id = ?',
+                (str(name), profile_id),
+            )
+
+    def get_profile_name(self, profile_id: int):
+        """Επιστρέφει το αποθηκευμένο όνομα ή ``None`` για προεπιλεγμένο προφίλ."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM profiles WHERE id = ?", (profile_id,))
+            row = cursor.fetchone()
+
+        if not row or not row[0]:
+            return None
+
+        name = row[0].strip()
+        if not name or name == f"Profile {profile_id}":
+            return None
+
+        # Συμβατότητα με την παλιά μορφή "Προφίλ N (Game)".
+        prefix = f"Προφίλ {profile_id} ("
+        if name.startswith(prefix) and name.endswith(")"):
+            return name[len(prefix):-1].strip() or None
+
+        return name
 
     # --- ΜΕΘΟΔΟΙ ΓΙΑ ΤΑ MAPPINGS ---
-    def save_mapping(self, profile_id: int, action: str, mapped_key: str, threshold: float = 0.05):
-        """Αποθηκεύει τη νέα κίνηση και το όριό της."""
-        with self._get_connection() as conn:
+    def save_mapping(self, profile_id: int, action: str, mapped_key: str, threshold=None):
+        """Αποθηκεύει τη νέα κίνηση και το όριό της.
+
+        Το ``threshold=None`` διατηρεί την υπάρχουσα τιμή (και χρησιμοποιεί
+        0.05 για νέες εγγραφές), ώστε μια αλλαγή πλήκτρου να μη μηδενίζει την
+        ευαισθησία που είχε ορίσει ο χρήστης.
+        """
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT OR REPLACE INTO mappings (profile_id, action, mapped_key, threshold)
-                VALUES (?, ?, ?, ?)
-            ''', (profile_id, action, mapped_key, threshold))
-            conn.commit()
+                INSERT INTO mappings (profile_id, action, mapped_key, threshold)
+                VALUES (?, ?, ?, COALESCE(?, 0.05))
+                ON CONFLICT(profile_id, action) DO UPDATE SET
+                    mapped_key = excluded.mapped_key,
+                    threshold = COALESCE(?, mappings.threshold, 0.05)
+            ''', (profile_id, action, mapped_key, threshold, threshold))
 
     def get_mappings(self, profile_id: int):
         """Επιστρέφει τις κινήσεις του προφίλ: (id, action, mapped_key, threshold)."""
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT id, action, mapped_key, threshold 
@@ -99,38 +157,35 @@ class DBManager:
 
     def update_mapping(self, mapping_id: int, new_key: str, new_threshold: float):
         """Ενημερώνει το πλήκτρο και την ευαισθησία (Από το Review Window)."""
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 UPDATE mappings 
                 SET mapped_key = ?, threshold = ? 
                 WHERE id = ?
             ''', (new_key, new_threshold, mapping_id))
-            conn.commit()
 
     def delete_mapping(self, mapping_id: int):
         """Διαγράφει οριστικά την κίνηση βάσει του μοναδικού ID."""
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM mappings WHERE id = ?', (mapping_id,))
-            conn.commit()
 
     # --- ΜΕΘΟΔΟΙ ΓΙΑ ΤΙΣ ΡΥΘΜΙΣΕΙΣ ---
     def get_setting(self, key: str, default=None):
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
             row = cursor.fetchone()
             return row[0] if row else default
 
     def set_setting(self, key: str, value):
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, str(value)),
             )
-            conn.commit()
 
     def get_last_profile(self) -> int:
         """Επιστρέφει το τελευταίο ενεργό προφίλ (default 1)."""

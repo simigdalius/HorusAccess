@@ -13,6 +13,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -21,13 +22,22 @@ IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
 
-# Λίστα αποκλεισμού για συστήματα/εργαλεία που μπορεί να ξεφύγουν από launchers
+# Λέξεις που δηλώνουν ξεκάθαρα εργαλείο/σύστημα και δεν αποτελούν μέρος τίτλου
+# παιχνιδιού. Εφαρμόζονται πάντα, ακόμη και σε τίτλους από manifests.
 IGNORED_KEYWORDS = [
-    "opera", "browser", "code", "visual studio", "wps", "office", "word", "excel",
-    "powerpoint", "administration", "tools", "librewolf", "chrome", "firefox",
-    "edge", "discord", "spotify", "vlc", "uninstall", "setup", "help", "python",
-    "git", "node", "cmd", "powershell", "control panel", "settings", "redistributable",
+    "opera", "browser", "visual studio", "wps", "office", "excel",
+    "powerpoint", "administration", "librewolf", "chrome", "firefox",
+    "edge", "discord", "spotify", "vlc", "uninstall", "help", "python",
+    "git", "cmd", "powershell", "control panel", "settings", "redistributable",
     "steamworks", "proton", "prerequisites", "epic online services",
+]
+
+# Λέξεις που είναι έγκυρες μέσα σε τίτλο παιχνιδιού ("Code Vein", "Sword of…")
+# αλλά δείχνουν εφαρμογή γραφείου/εργαλείο. Ελέγχονται μόνο για shortcuts της
+# επιφάνειας εργασίας, όπου δεν υπάρχει manifest να επιβεβαιώσει ότι πρόκειται
+# για παιχνίδι.
+DESKTOP_ONLY_IGNORED_KEYWORDS = [
+    "code", "word", "tools", "node", "setup",
 ]
 
 # Επεκτάσεις που δείχνουν ότι ένα shortcut/launcher τρέχει πραγματικό πρόγραμμα
@@ -46,8 +56,21 @@ LAUNCHER_NAMES = {
 }
 
 
-def is_valid_game(name):
-    """Αποκλείει browsers, office suites, installers και ίδια τα launchers."""
+def _matches_keyword(lowered, keyword, word_boundary=False):
+    if not word_boundary:
+        return keyword in lowered
+    pattern = rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])"
+    return re.search(pattern, lowered) is not None
+
+
+def is_valid_game(name, strict=True):
+    """Αποκλείει browsers, office suites, installers και ίδια τα launchers.
+
+    ``strict`` εφαρμόζει και τη λίστα με τις αμφίσημες λέξεις. Οι detectors που
+    διαβάζουν manifest (Steam/Epic/GOG) το θέτουν σε ``False``, γιατί εκεί ο
+    τίτλος προέρχεται από εγκατεστημένο παιχνίδι και όχι από ένα shortcut που
+    μπορεί να είναι οποιαδήποτε εφαρμογή.
+    """
     if not name:
         return False
 
@@ -56,7 +79,16 @@ def is_valid_game(name):
     if lowered in LAUNCHER_NAMES or os.path.splitext(lowered)[0] in LAUNCHER_NAMES:
         return False
 
-    return not any(ignored in lowered for ignored in IGNORED_KEYWORDS)
+    if any(_matches_keyword(lowered, ignored) for ignored in IGNORED_KEYWORDS):
+        return False
+
+    if strict and any(
+        _matches_keyword(lowered, ignored, word_boundary=True)
+        for ignored in DESKTOP_ONLY_IGNORED_KEYWORDS
+    ):
+        return False
+
+    return True
 
 
 def _is_env_assignment(token):
@@ -65,11 +97,24 @@ def _is_env_assignment(token):
     return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token))
 
 
+def _is_desktop_field_code(token):
+    """True για %f/%F/%u/%U και τα υπόλοιπα field codes του desktop-entry spec."""
+    return bool(re.fullmatch(r"%[A-Za-z]", token))
+
+
 def _first_exec_token(command):
     """Επιστρέφει το πρώτο πραγματικό εκτελέσιμο μιας γραμμής Exec=.
 
-    Αφαιρεί επιλέγοντα env μεταβλητές, π.χ. "env WINEPREFIX=... /games/game.exe"."""
-    tokens = command.split()
+    Χρησιμοποιεί ``shlex.split`` ώστε τα quoted paths με κενά να μην κόβονται,
+    και αφαιρεί επιλέγοντα env μεταβλητές, π.χ.
+    "env WINEPREFIX=... /games/game.exe"."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        # Μη ισορροπημένα quotes: καλύτερα μια χονδρική προσπάθεια παρά καθόλου.
+        tokens = [token.strip("\"'") for token in command.split()]
+
+    tokens = [token for token in tokens if not _is_desktop_field_code(token)]
 
     while tokens and tokens[0] == "env":
         tokens.pop(0)
@@ -79,21 +124,43 @@ def _first_exec_token(command):
     return tokens[0] if tokens else ""
 
 
-def _is_launchable_command(command):
-    """True αν η εντολή δείχνει σε πραγματικό πρόγραμμα που μπορεί να εκτελεστεί."""
+def _has_dir_component(token):
+    return os.sep in token or (os.altsep is not None and os.altsep in token)
+
+
+def _is_launchable_command(command, base_dir=None):
+    """True αν η εντολή δείχνει σε πραγματικό πρόγραμμα που μπορεί να εκτελεστεί.
+
+    Τα σχετικά μονοπάτια (π.χ. ``./launch.sh``) ελέγχονται πρώτα δίπλα στο
+    ``.desktop`` αρχείο και μετά ως ονόματα εντολών στο ``PATH``. Ένα αρχείο με
+    επέκταση μόνο τότε είναι αποδεκτό όταν υπάρχει πραγματικά στον δίσκο.
+    """
     token = _first_exec_token(command)
     if not token:
         return False
 
-    # Wine/Proton και packaged binaries έχουν επέκταση
-    if token.lower().endswith(LAUNCHABLE_SUFFIXES):
-        return True
-
-    # Τα native Linux builds είναι συνήθως executables χωρίς επέκταση
+    token = os.path.expanduser(token)
+    candidates = []
     if os.path.isabs(token):
-        return os.path.isfile(token) and os.access(token, os.X_OK)
+        candidates.append(token)
+    else:
+        if base_dir:
+            candidates.append(os.path.normpath(os.path.join(base_dir, token)))
+        candidates.append(token)
 
-    return shutil.which(token) is not None
+    for candidate in candidates:
+        if not os.path.isfile(candidate):
+            continue
+        if candidate.lower().endswith(LAUNCHABLE_SUFFIXES):
+            return True
+        if os.access(candidate, os.X_OK):
+            return True
+
+    # Κανένα αρχείο στον δίσκο: μόνο ένα σκέτο όνομα μπορεί να λυθεί από το PATH.
+    if not os.path.isabs(token) and not _has_dir_component(token):
+        return shutil.which(token) is not None
+
+    return False
 
 
 # Οι Epic manifest δεν περιέχουν πραγματική διεύθυνση εικόνας. Χρησιμοποιείται
@@ -206,7 +273,7 @@ def _detect_steam(found_names):
             pattern = os.path.join(library, "steamapps", "appmanifest_*.acf")
             for manifest in glob.glob(pattern):
                 title, app_id = _parse_acf(manifest)
-                if not title or title in found_names or not is_valid_game(title):
+                if not title or title in found_names or not is_valid_game(title, strict=False):
                     continue
 
                 found_names.add(title)
@@ -259,7 +326,7 @@ def _detect_epic(found_names):
                 continue
 
             title = data.get("DisplayName")
-            if not title or title in found_names or not is_valid_game(title):
+            if not title or title in found_names or not is_valid_game(title, strict=False):
                 continue
 
             found_names.add(title)
@@ -303,10 +370,16 @@ def _parse_goggame(info_path):
     """Επιστρέφει το display name ενός goggame-*.info manifest."""
     try:
         with open(info_path, "r", encoding="utf-8", errors="ignore") as f:
-            return json.load(f).get("name")
+            data = json.load(f)
     except Exception:
-        pass
+        data = None
 
+    if isinstance(data, dict):
+        title = data.get("name")
+        if title:
+            return title
+
+    # Το JSON μπορεί να είναι έγκυρο αλλά να μην έχει top-level "name".
     try:
         with open(info_path, "r", encoding="utf-8", errors="ignore") as f:
             match = re.search(r'"name"\s*:\s*"([^"]+)"', f.read())
@@ -328,18 +401,25 @@ def _detect_gog(found_names):
             while True:
                 try:
                     subkey_name = winreg.EnumKey(gog_key, index)
-                    subkey = winreg.OpenKey(gog_key, subkey_name)
-                    title, _ = winreg.QueryValueEx(subkey, "gameName")
-                    if title and title not in found_names and is_valid_game(title):
-                        found_names.add(title)
-                        games.append({
-                            "title": title,
-                            "platform": "GOG",
-                            "genre": "GOG Game",
-                        })
-                    index += 1
                 except OSError:
+                    # Τέλος της απαρίθμησης.
                     break
+
+                index += 1
+                try:
+                    with winreg.OpenKey(gog_key, subkey_name) as subkey:
+                        title, _ = winreg.QueryValueEx(subkey, "gameName")
+                except OSError:
+                    # Ένα subkey χωρίς gameName δεν πρέπει να σταματήσει την υπόλοιπη λίστα.
+                    continue
+
+                if title and title not in found_names and is_valid_game(title, strict=False):
+                    found_names.add(title)
+                    games.append({
+                        "title": title,
+                        "platform": "GOG",
+                        "genre": "GOG Game",
+                    })
         except Exception:
             pass
 
@@ -347,7 +427,7 @@ def _detect_gog(found_names):
     for root in _gog_search_roots():
         for info_path in glob.glob(os.path.join(root, "**", "goggame-*.info"), recursive=True):
             title = _parse_goggame(info_path)
-            if not title or title in found_names or not is_valid_game(title):
+            if not title or title in found_names or not is_valid_game(title, strict=False):
                 continue
 
             found_names.add(title)
@@ -457,7 +537,7 @@ def _detect_linux_desktop_entries(desktop_dir):
 
         title = name.group(1).strip()
         command = _first_exec_token(exec_line.group(1))
-        if not _is_launchable_command(exec_line.group(1)):
+        if not _is_launchable_command(exec_line.group(1), desktop_dir):
             continue
 
         games.append({"title": title, "path": command, "platform": "PC Game", "genre": "Standalone Game"})
@@ -536,15 +616,28 @@ def _detect_desktop_entries(found_names):
     return games
 
 
+def _safe_detect(label, detector, found_names):
+    """Τρέχει έναν detector χωρίς να επιτρέπει σε ένα σφάλμα να κρύψει τα άλλα."""
+    try:
+        return detector(found_names)
+    except Exception as exc:
+        print(f"⚠️ Αποτυχία ανίχνευσης {label}: {exc}")
+        return []
+
+
 def detect_installed_games():
     """Ανιχνεύει παιχνίδια από Steam, Epic, GOG και τον φάκελο εφαρμογών/
     επιφάνειας εργασίας, ανεξάρτητα από το λειτουργικό σύστημα."""
     found_names = set()
     games = []
 
-    games.extend(_detect_epic(found_names))
-    games.extend(_detect_steam(found_names))
-    games.extend(_detect_gog(found_names))
-    games.extend(_detect_desktop_entries(found_names))
+    detectors = (
+        ("Epic Games", _detect_epic),
+        ("Steam", _detect_steam),
+        ("GOG", _detect_gog),
+        ("desktop shortcuts", _detect_desktop_entries),
+    )
+    for label, detector in detectors:
+        games.extend(_safe_detect(label, detector, found_names))
 
-    return games
+    return sorted(games, key=lambda game: game["title"].casefold())

@@ -11,6 +11,11 @@ import json
 import ollama
 import io
 import requests
+
+# Ο φάκελος HorusAccess πρέπει να είναι στο sys.path πριν από τα imports των
+# core/database, ώστε να δουλεύει και το `python HorusAccess/gui/main.py`.
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from core.input_backend import (
     key_down,
     key_up,
@@ -20,11 +25,54 @@ from core.input_backend import (
     screen_size,
     disable_failsafe,
 )
+from core.keys import canonical_key
 from core.ui_utils import default_font_family
 from core.game_detector import detect_installed_games
 from database.db_manager import DBManager
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+AVAILABLE_MOTIONS = [
+    "mouth_open", "smile", "left_eye_blink", "right_eye_blink",
+    "eyebrows_up", "eyebrows_frown", "head_up", "head_down", "head_left", "head_right",
+]
+
+
+def _validate_mappings(items, allowed_keys):
+    """Κρατά μόνο τις προτάσεις του LLM που δείχνουν σε γνωστή κίνηση/πλήκτρο."""
+    valid_motions = set(AVAILABLE_MOTIONS)
+    valid_keys = {canonical_key(key) for key in allowed_keys}
+    validated = []
+    seen_motions = set()
+
+    for item in items or []:
+        if not isinstance(item, dict):
+            print(f"⚠️ Παραλείπεται μη έγκυρη πρόταση Horus AI: {item!r}")
+            continue
+
+        motion = item.get("motion")
+        key = canonical_key(item.get("key"))
+
+        if not motion or not key:
+            print(f"⚠️ Παράλειψη πρότασης χωρίς motion/key: {item!r}")
+            continue
+        if motion not in valid_motions:
+            print(f"⚠️ Παράλειψη άγνωστης κίνησης: {motion}")
+            continue
+        if key not in valid_keys:
+            print(f"⚠️ Παράλειψη μη επιτρεπτού πλήκτρου: {item.get('key')}")
+            continue
+        if motion in seen_motions:
+            continue
+
+        seen_motions.add(motion)
+        validated.append({
+            "motion": motion,
+            "key": key,
+            "description": str(item.get("description", "")),
+        })
+
+    return validated
+
 
 def ui_font(**kwargs):
     """CTkFont που χρησιμοποιεί πάντα οικογένεια γραμματοσειρών διαθέσιμη στο τρέχον OS."""
@@ -72,6 +120,7 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
+        self._dialog = None
 
         self.title("Horus AI - Αυτόνομη Επιλογή Εγκατεστημένων Παιχνιδιών")
         self.geometry("950x700")
@@ -79,11 +128,28 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
         self.attributes("-topmost", True)
         self.resizable(False, False)
         self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Ανίχνευση πραγματικών παιχνιδιών στο σύστημα
         self.games = self.detect_installed_games()
 
         self._build_ui()
+
+
+    def _on_close(self):
+        """Κλείνει το παράθυρο και τυχόν παιδικό dialog επιβεβαίωσης."""
+        if self._dialog is not None:
+            try:
+                self._dialog.grab_release()
+                self._dialog.destroy()
+            except Exception:
+                pass
+            self._dialog = None
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
 
 
     def detect_installed_games(self):
@@ -175,7 +241,7 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
             fg_color="#c0392b",
             hover_color="#e74c3c",
             corner_radius=12,
-            command=self.destroy        # Κλείνει το παράθυρο/frame
+            command=self._on_close        # Κλείνει το παράθυρο/frame
         )
         self.close_btn.pack(pady=15, padx=30, fill="x")
     
@@ -188,10 +254,7 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
         is_browser = any(b in game_title_lower for b in ["opera", "chrome", "edge", "firefox", "browser"])
         is_2d_platformer = any(p in game_title_lower for p in ["sonic", "mario", "celeste", "hollow knight", "limbo", "cuphead"])
         
-        available_motions = [
-            "mouth_open", "smile", "left_eye_blink", "right_eye_blink",
-            "eyebrows_up", "eyebrows_frown", "head_up", "head_down", "head_left", "head_right"
-        ]
+        available_motions = list(AVAILABLE_MOTIONS)
 
         # 2. Εξειδικευμένες Οδηγίες & Επιτρεπόμενα Πλήκτρα ανά Κατηγορία
         if is_browser:
@@ -257,11 +320,14 @@ Respond STRICTLY with a valid JSON object matching this schema:
             
             # Fallback αν το μοντέλο επιστρέψει λίστα αντί για dictionary
             if isinstance(result, list):
-                mappings = result
+                items = result
+            elif isinstance(result, dict):
+                items = result.get("mappings", [])
             else:
-                mappings = result.get("mappings", [])
+                items = []
 
-            print(f"✅ Δημιουργήθηκαν {len(mappings)} mappings για το {game['title']}")
+            mappings = _validate_mappings(items, allowed_keys)
+            print(f"✅ Δημιουργήθηκαν {len(mappings)} έγκυρα mappings για το {game['title']}")
 
         except Exception as e:
             print(f"⚠️ Σφάλμα απόκρισης Ollama: {e}")
@@ -292,7 +358,7 @@ Respond STRICTLY with a valid JSON object matching this schema:
                 ]
 
         # 1. Εύρεση του πρώτου κενού προφίλ (1 έως 5)
-        target_profile = 1
+        target_profile = None
         if hasattr(self.parent, 'db'):
             for p_id in range(1, 6):
                 existing = self.parent.db.get_mappings(p_id)
@@ -300,17 +366,38 @@ Respond STRICTLY with a valid JSON object matching this schema:
                     target_profile = p_id
                     break
 
+        if target_profile is None:
+            messagebox.showwarning(
+                "Δεν υπάρχει κενό προφίλ",
+                "Και τα 5 προφίλ έχουν ήδη κινήσεις.\n\n"
+                "Άνοιξε «Εμφάνιση Καταχωρημένων» και διάγραψε κινήσεις από ένα "
+                "προφίλ πριν χρησιμοποιήσεις το Horus AI.",
+                parent=self,
+            )
+            return
+
         # 2. Εμφάνιση παραθύρου επιβεβαίωσης
         self.show_confirmation_dialog(game['title'], mappings, target_profile)
     
     def show_confirmation_dialog(self, game_title, mappings, target_profile):
         """Εμφανίζει παράθυρο με τις προτάσεις του Horus AI και περιμένει επιβεβαίωση (OK)."""
         dialog = ctk.CTkToplevel(self)
+        self._dialog = dialog
         dialog.title("Πρόταση Horus AI")
         dialog.geometry("550x480")
         dialog.configure(fg_color="#111215")
         dialog.attributes("-topmost", True)
         dialog.grab_set()
+
+        def close_dialog():
+            self._dialog = None
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
 
         # Τίτλος
         ctk.CTkLabel(
@@ -332,7 +419,10 @@ Respond STRICTLY with a valid JSON object matching this schema:
         scroll_frame.pack(fill="both", expand=True, padx=20, pady=5)
 
         for m in mappings:
-            row_str = f"• {m['motion']} ➔ [{m['key'].upper()}] ({m.get('description', '')})"
+            motion = m.get("motion", "?")
+            key = str(m.get("key", "")).upper()
+            description = m.get("description", "")
+            row_str = f"• {motion} ➔ [{key}] ({description})"
             ctk.CTkLabel(
                 scroll_frame, 
                 text=row_str, 
@@ -346,15 +436,19 @@ Respond STRICTLY with a valid JSON object matching this schema:
             if hasattr(self.parent, 'db'):
                 # 1. Αποθήκευση των mappings
                 for item in mappings:
+                    motion = item.get("motion")
+                    key = item.get("key")
+                    if not motion or not key:
+                        continue
                     self.parent.db.save_mapping(
                         profile_id=target_profile,
-                        action=item["motion"],
-                        mapped_key=item["key"]
+                        action=motion,
+                        mapped_key=key
                     )
                 
-                # 2. Αποθήκευση της περιγραφής/ονόματος της εφαρμογής για το προφίλ
-                if hasattr(self.parent.db, 'update_profile_name'):
-                    self.parent.db.update_profile_name(target_profile, f"Προφίλ {target_profile} ({game_title})")
+                # 2. Αποθήκευση του ονόματος της εφαρμογής για το προφίλ
+                if game_title:
+                    self.parent.db.update_profile_name(target_profile, game_title)
                 
                 print(f"💾 Επιτυχής αποθήκευση για την εφαρμογή '{game_title}' στο Προφίλ {target_profile}!")
                 
@@ -364,8 +458,7 @@ Respond STRICTLY with a valid JSON object matching this schema:
                 if hasattr(self.parent, 'change_profile'):
                     self.parent.change_profile(str(target_profile))
 
-            dialog.grab_release()
-            dialog.destroy()
+            close_dialog()
             self.grab_release()
             self.destroy()
 
@@ -381,59 +474,6 @@ Respond STRICTLY with a valid JSON object matching this schema:
             command=confirm_and_save
         )
         btn_ok.pack(pady=20, padx=20, fill="x")
-
-
-
-class ProfileReviewWindow(ctk.CTkToplevel):
-    def __init__(self, parent, current_profile_id, db):
-        super().__init__(parent)
-        
-        self.parent = parent
-        self.profile_id = current_profile_id
-        self.db = db
-
-        self.title(f"Διαχείριση Καταχωρημένων (Προφίλ {self.profile_id})")
-        self.geometry("750x550")
-        self.attributes("-topmost", True)
-
-        self.row_widgets = {} 
-        self._build_ui()
-        self.load_data()
-
-    def _build_ui(self):
-        # 1. Εμφάνιση Τίτλου
-        ctk.CTkLabel(
-            self, 
-            text="Διαχείριση Κινήσεων", 
-            font=ctk.CTkFont(size=24, weight="bold"),
-            text_color="#00f0ff"
-        ).pack(pady=(20, 10))
-
-        # 2. Scrollable Frame για τη λίστα των κινήσεων
-        self.scroll_frame = ctk.CTkScrollableFrame(self, width=720, height=400)
-        self.scroll_frame.pack(pady=10, padx=20, fill="both", expand=True)
-
-        # 3. ΜΕΓΑΛΟ ΚΟΥΜΠΙ ΚΛΕΙΣΙΜΟΥ (Large Close Target)
-        self.close_btn = ctk.CTkButton(
-            self,
-            text="❌ ΚΛΕΙΣΙΜΟ",
-            font=ctk.CTkFont(size=20, weight="bold"),
-            height=55,                  # Μεγάλο ύψος για εύκολο στόχο
-            fg_color="#c0392b",
-            hover_color="#e74c3c",
-            corner_radius=12,
-            command=self.destroy        # Κλείνει το παράθυρο/frame
-        )
-        self.close_btn.pack(pady=15, padx=30, fill="x")
-
-    
-
-    def delete_entry(self, mapping_id):
-        self.db.delete_mapping(mapping_id)
-        print(f" Διαγράφηκε η κίνηση με ID {mapping_id}")
-        self.load_data()
-        if hasattr(self.parent, 'refresh_active_mappings'):
-            self.parent.refresh_active_mappings()
 
 
 
@@ -538,7 +578,7 @@ class ProfileReviewWindow(ctk.CTkToplevel):
 
         ctk.CTkLabel(header_frame, text="Είδος Κίνησης", font=ctk.CTkFont(size=12, weight="bold"), text_color="#a0a5b5").grid(row=0, column=0, sticky="w", padx=12, pady=5)
         ctk.CTkLabel(header_frame, text="Πλήκτρο", font=ctk.CTkFont(size=12, weight="bold"), text_color="#a0a5b5").grid(row=0, column=1, sticky="w", padx=8, pady=5)
-        ctk.CTkLabel(header_frame, text="Ενέργεια", font=ctk.CTkFont(size=12, weight="bold"), text_color="#a0a5b5").grid(row=0, column=3, padx=8, pady=5)
+        ctk.CTkLabel(header_frame, text="Ενέργεια", font=ctk.CTkFont(size=12, weight="bold"), text_color="#a0a5b5").grid(row=0, column=2, padx=8, pady=5)
 
         # Εγγραφές
         for item in mappings:
@@ -592,7 +632,7 @@ class ProfileReviewWindow(ctk.CTkToplevel):
             return
 
         remaining = [row for row in self.db.get_mappings(self.profile_id) if row[0] != mapping_id]
-        if not any(row[2] == "left_click" for row in remaining):
+        if not any(canonical_key(row[2]) == "left_click" for row in remaining):
             messagebox.showwarning(
                 "Απαιτείται Κλικ",
                 "Το αριστερό κλικ (L. CLICK) πρέπει να έχει πάντα μια κίνηση.\n\n"
@@ -824,7 +864,7 @@ class MotionInputWindow(ctk.CTkToplevel):
             # bind another motion for click first.
             pending = {row[1]: row[2] for row in self.db.get_mappings(clean_id)}
             pending[self.selected_motion] = self.selected_key
-            if "left_click" not in pending.values():
+            if not any(canonical_key(key) == "left_click" for key in pending.values()):
                 messagebox.showwarning(
                     "Απαιτείται Κλικ",
                     "Το αριστερό κλικ (L. CLICK) πρέπει να έχει πάντα μια κίνηση.\n\n"
@@ -879,7 +919,19 @@ class MotionInputWindow(ctk.CTkToplevel):
         self.destroy()
 
 class SmartControllerApp(ctk.CTk):
+    def _release_all_keys(self):
+        """Απελευθερώνει όλα τα πλήκτρα που κρατάει αυτή η εφαρμογή."""
+        for key in list(getattr(self, "pressed_keys", ())):
+            try:
+                key_up(key)
+            except Exception as exc:
+                print(f"⚠️ Αποτυχία απελευθέρωσης '{key}': {exc}")
+        self.pressed_keys.clear()
+
     def refresh_active_mappings(self):
+        # Τα παλιά mappings μπορεί να κρατούν πατημένο ένα πλήκτρο που δεν
+        # υπάρχει πλέον, οπότε απελευθερώνουμε πριν τα αντικαταστήσουμε.
+        self._release_all_keys()
         mappings = self.db.get_mappings(self.current_profile_id)
         self.active_mappings.clear()
         
@@ -893,6 +945,7 @@ class SmartControllerApp(ctk.CTk):
     
             self.active_mappings = {}
             self.pressed_keys = set()
+            self._sens_save_job = None
             self.is_recording_motion = False
             self.recorded_landmarks = []
             self.recorded_frames = []
@@ -1145,7 +1198,28 @@ class SmartControllerApp(ctk.CTk):
                 break
 
     def update_sens_label(self, value):
-        self.sens_value_label.configure(text=f"{value:.1f}")
+        if hasattr(self, "sens_value_label"):
+            self.sens_value_label.configure(text=f"{value:.1f}")
+        self._schedule_sensitivity_save()
+
+    def _schedule_sensitivity_save(self):
+        """Αποθηκεύει την ευαισθησία 400ms μετά την τελευταία αλλαγή."""
+        if not hasattr(self, "db") or not hasattr(self, "current_profile_id"):
+            return
+        if self._sens_save_job is not None:
+            try:
+                self.after_cancel(self._sens_save_job)
+            except Exception:
+                pass
+        self._sens_save_job = self.after(400, self._persist_sensitivity)
+
+    def _persist_sensitivity(self):
+        self._sens_save_job = None
+        try:
+            value = float(self.sens_slider.get())
+            self.db.update_profile_sensitivity(self.current_profile_id, value)
+        except Exception as e:
+            print(f"⚠️ Αποτυχία αποθήκευσης ευαισθησίας: {e}")
 
     def _on_app_focus_in(self, event=None):
         self._focus_token += 1
@@ -1217,7 +1291,10 @@ class SmartControllerApp(ctk.CTk):
 
                         # 4. Υπολογισμός κίνησης X βάσει γέρσιματος (Roll)
                         if abs(roll_tilt) > deadzone_roll:
-                            sign_x = 1 if roll_tilt > 0 else -1
+                            # Το frame είναι οριζόντια flipped: όταν ο χρήστης
+                            # γέρνει αριστερά, το roll_tilt γίνεται θετικό, οπότε
+                            # το πρόσημο του X πρέπει να είναι αντίθετο.
+                            sign_x = -1 if roll_tilt > 0 else 1
                             excess_x = abs(roll_tilt) - deadzone_roll
                             move_x = sign_x * (excess_x * 500 * sens_val)
 
@@ -1280,34 +1357,47 @@ class SmartControllerApp(ctk.CTk):
                         }
 
                         active_mappings = getattr(self, 'active_mappings', {})
+                        pressed_keys = getattr(self, 'pressed_keys', set())
+
+                        # Πρώτα υπολογίζουμε ποια πλήκτρα πρέπει να είναι πατημένα,
+                        # ώστε ένα πλήκτρο που το διεκδικούν δύο κινήσεις να μην
+                        # απελευθερώνεται όταν σταματήσει μόνο η μία.
+                        desired_keys = set()
                         for action, data in active_mappings.items():
-                            target_key = data.get("key")
+                            target_key = canonical_key(data.get("key"))
                             threshold = data.get("threshold")
 
                             if not target_key or action not in current_metrics:
                                 continue
-
-                            is_active = False
+                            if threshold is None:
+                                threshold = 0.05
 
                             if action in ["mouth_open", "smile", "eyebrows_up", "cheek_puff"]:
                                 is_active = current_metrics[action] > threshold
                             elif action in ["left_eye_blink", "right_eye_blink", "kiss", "jaw_left", "jaw_right", "nose_scrunch"]:
                                 is_active = current_metrics[action] < threshold
-
-                            pressed_keys = getattr(self, 'pressed_keys', set())
-                            if is_active:
-                                if target_key not in pressed_keys:
-                                    key_down(target_key)
-                                    pressed_keys.add(target_key)
-                                    print(f"🟢 [ΕΝΕΡΓΟ] {action} -> Πατήθηκε: {target_key.upper()}")
                             else:
-                                if target_key in pressed_keys:
-                                    key_up(target_key)
-                                    pressed_keys.remove(target_key)
-                                    print(f"🔴 [ΑΝΕΝΕΡΓΟ] {action} -> Απελευθερώθηκε: {target_key.upper()}")
+                                is_active = False
+
+                            if is_active:
+                                desired_keys.add(target_key)
+
+                        for target_key in sorted(desired_keys - pressed_keys):
+                            key_down(target_key)
+                            pressed_keys.add(target_key)
+                            print(f"🟢 [ΕΝΕΡΓΟ] Πατήθηκε: {target_key.upper()}")
+
+                        for target_key in sorted(pressed_keys - desired_keys):
+                            key_up(target_key)
+                            pressed_keys.discard(target_key)
+                            print(f"🔴 [ΑΝΕΝΕΡΓΟ] Απελευθερώθηκε: {target_key.upper()}")
 
                     except Exception as e:
                         print(f"❌ ΣΦΑΛΜΑ ΣΤΑ GESTURES: {e}")
+            else:
+                # Το πρόσωπο χάθηκε (κοίταξε αλλού / κόλλησε η κάμερα). Χωρίς
+                # αυτό, όποιο πλήκτρο ήταν πατημένο θα έμενε πατημένο για πάντα.
+                self._release_all_keys()
 
             img = Image.fromarray(rgb_frame)
             ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(640, 480))
@@ -1328,6 +1418,13 @@ class SmartControllerApp(ctk.CTk):
         review_popup.grab_set()
 
     def on_closing(self):
+        if self._sens_save_job is not None:
+            try:
+                self.after_cancel(self._sens_save_job)
+            except Exception:
+                pass
+            self._persist_sensitivity()
+        self._release_all_keys()
         try:
             self.db.set_last_profile(self.current_profile_id)
         except Exception:

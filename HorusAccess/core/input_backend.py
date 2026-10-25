@@ -16,6 +16,8 @@ import contextlib
 import io
 import sys
 
+from .keys import BUTTON_ALIASES, normalize_key
+
 IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
@@ -81,64 +83,41 @@ with _mute_native_warnings():
         _linux_driver = "pyautogui"
 
 
-_PYNPUT_SPECIAL_KEYS = {
-    "space": "space",
-    "enter": "enter",
-    "return": "enter",
-    "esc": "esc",
-    "escape": "esc",
-    "tab": "tab",
-    "shift": "shift",
-    "shift_l": "shift_l",
-    "shift_r": "shift_r",
-    "ctrl": "ctrl",
-    "ctrl_l": "ctrl_l",
-    "ctrl_r": "ctrl_r",
-    "alt": "alt",
-    "alt_l": "alt_l",
-    "alt_r": "alt_r",
-    "up": "up",
-    "down": "down",
-    "left": "left",
-    "right": "right",
-    "backspace": "backspace",
-    "delete": "delete",
-    "home": "home",
-    "end": "end",
-    "page_up": "page_up",
-    "page_down": "page_down",
-}
-
-
 def _to_pynput_key(name):
-    """Maps a pydirectinput-style key name to a pynput key object."""
-    if _kb_key is not None and name in _PYNPUT_SPECIAL_KEYS:
-        return getattr(_kb_key, _PYNPUT_SPECIAL_KEYS[name], name)
+    """Maps a pynput key name to a pynput key object, or ``None``."""
+    if _kb_key is not None:
+        key = getattr(_kb_key, name, None)
+        if key is not None:
+            return key
     if _kb_code is not None and len(name) == 1:
         return _kb_code.from_char(name)
-    return name
+    return None
 
 
-# The application always speaks "pydirectinput key names". This table maps them
-# onto whatever the active backend expects.
-_KEY_ALIASES = {
-    "win32": {},
-    "linux": {
-        "escape": "esc",
-    },
-    "darwin": {
-        "enter": "return",
-        "escape": "esc",
-    },
-}
+def _keyboard_backend():
+    """Name of the backend that actually injects keyboard events."""
+    if _kb_ctrl is not None:
+        return "pynput"
+    if IS_WINDOWS:
+        return "pydirectinput"
+    if IS_MACOS:
+        return "pyautogui-darwin"
+    return "pyautogui"
 
-# Mouse pseudo-keys. The profiles store these alongside real keyboard keys, so
-# they have to be routed to the mouse buttons instead of the keyboard.
-_BUTTON_ALIASES = {
-    "left_click": "left",
-    "right_click": "right",
-    "middle_click": "middle",
-}
+
+_UNSUPPORTED_KEYS = set()
+
+
+def _log_unsupported(backend, name, detail=None):
+    """Logs a key the backend cannot inject, once per key/backend pair."""
+    token = (backend, name)
+    if token in _UNSUPPORTED_KEYS:
+        return
+    _UNSUPPORTED_KEYS.add(token)
+    message = f"⚠️ [input_backend] Το πλήκτρο '{name}' δεν υποστηρίζεται από {backend}."
+    if detail:
+        message += f" ({detail})"
+    print(message)
 
 
 def backend_name():
@@ -149,26 +128,21 @@ def backend_name():
     return "pyautogui"
 
 
-def normalize_key(key):
-    """Returns the backend-specific name for a logical HorusAccess key."""
-    if key is None:
-        return None
-    name = str(key).strip().lower()
-    if not name:
-        return None
-    return _KEY_ALIASES.get(sys.platform, {}).get(name, name)
-
-
 def disable_failsafe():
-    """Turns off the "corner of screen" emergency stop on every backend."""
-    try:
-        if IS_LINUX and _linux_driver == "pynput":
-            # pynput has no global FAILSAFE toggle; ignore
-            return
-        if _driver is not None and hasattr(_driver, "FAILSAFE"):
-            _driver.FAILSAFE = False
-    except Exception:
-        pass
+    """Turns off the "corner of screen" emergency stop on every backend.
+
+    On Linux ``_linux_driver`` can claim "pynput" while pyautogui is the real
+    keyboard driver (the pynput keyboard import failed), so every loaded driver
+    is disarmed instead of trusting that flag.
+    """
+    for driver in {_driver, _metrics}:
+        if driver is None:
+            continue
+        try:
+            if hasattr(driver, "FAILSAFE"):
+                driver.FAILSAFE = False
+        except Exception:
+            pass
 
 
 def mouse_move(x, y):
@@ -226,58 +200,71 @@ def click(x=None, y=None):
 
 
 def key_down(key):
-    name = normalize_key(key)
+    backend = _keyboard_backend()
+    name = normalize_key(key, backend)
     if not name:
         return
-    if name in _BUTTON_ALIASES:
-        mouse_down(_BUTTON_ALIASES[name])
+    if name in BUTTON_ALIASES:
+        mouse_down(BUTTON_ALIASES[name])
         return
     if _kb_ctrl is not None:
+        pynput_key = _to_pynput_key(name)
+        if pynput_key is None:
+            _log_unsupported(backend, name)
+            return
         try:
-            _kb_ctrl.press(_to_pynput_key(name))
-        except Exception:
-            pass
+            _kb_ctrl.press(pynput_key)
+        except Exception as exc:
+            _log_unsupported(backend, name, exc)
         return
     if _driver is not None:
-        _driver.keyDown(name)
+        try:
+            _driver.keyDown(name)
+        except Exception as exc:
+            _log_unsupported(backend, name, exc)
 
 
 def key_up(key):
-    name = normalize_key(key)
+    backend = _keyboard_backend()
+    name = normalize_key(key, backend)
     if not name:
         return
-    if name in _BUTTON_ALIASES:
-        mouse_up(_BUTTON_ALIASES[name])
+    if name in BUTTON_ALIASES:
+        mouse_up(BUTTON_ALIASES[name])
         return
     if _kb_ctrl is not None:
+        pynput_key = _to_pynput_key(name)
+        if pynput_key is None:
+            _log_unsupported(backend, name)
+            return
         try:
-            _kb_ctrl.release(_to_pynput_key(name))
-        except Exception:
-            pass
+            _kb_ctrl.release(pynput_key)
+        except Exception as exc:
+            _log_unsupported(backend, name, exc)
         return
     if _driver is not None:
-        _driver.keyUp(name)
+        try:
+            _driver.keyUp(name)
+        except Exception as exc:
+            _log_unsupported(backend, name, exc)
 
 
 def tap_key(key, presses=1, interval=0.05):
-    name = normalize_key(key)
+    backend = _keyboard_backend()
+    name = normalize_key(key, backend)
     if not name:
         return
-    if name in _BUTTON_ALIASES:
+    if name in BUTTON_ALIASES:
         for _ in range(presses):
-            mouse_down(_BUTTON_ALIASES[name])
-            mouse_up(_BUTTON_ALIASES[name])
+            mouse_down(BUTTON_ALIASES[name])
+            mouse_up(BUTTON_ALIASES[name])
         return
-    if _kb_ctrl is not None:
-        import time
-        for i in range(presses):
-            key_down(name)
-            key_up(name)
-            if i < presses - 1:
-                time.sleep(interval)
-        return
-    if _driver is not None:
-        _driver.press(name, presses=presses, interval=interval)
+    import time
+    for i in range(presses):
+        key_down(name)
+        key_up(name)
+        if i < presses - 1:
+            time.sleep(interval)
 
 
 def screen_size():
