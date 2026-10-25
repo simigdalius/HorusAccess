@@ -188,17 +188,6 @@ def mouse_up(button="left"):
         return
 
 
-def click(x=None, y=None):
-    if x is not None and y is not None:
-        mouse_move(x, y)
-    if IS_LINUX and _linux_driver == "pynput":
-        _mouse_ctrl.click(_mouse_btn.left)  # type: ignore
-        return
-    if _driver is not None:
-        _driver.click()
-        return
-
-
 def key_down(key):
     backend = _keyboard_backend()
     name = normalize_key(key, backend)
@@ -247,24 +236,6 @@ def key_up(key):
             _driver.keyUp(name)
         except Exception as exc:
             _log_unsupported(backend, name, exc)
-
-
-def tap_key(key, presses=1, interval=0.05):
-    backend = _keyboard_backend()
-    name = normalize_key(key, backend)
-    if not name:
-        return
-    if name in BUTTON_ALIASES:
-        for _ in range(presses):
-            mouse_down(BUTTON_ALIASES[name])
-            mouse_up(BUTTON_ALIASES[name])
-        return
-    import time
-    for i in range(presses):
-        key_down(name)
-        key_up(name)
-        if i < presses - 1:
-            time.sleep(interval)
 
 
 def screen_size():

@@ -2,6 +2,11 @@ import contextlib
 import sqlite3
 import os
 
+try:
+    from core.keys import canonical_key
+except ImportError:  # Imported as part of the HorusAccess package (tests).
+    from HorusAccess.core.keys import canonical_key
+
 
 class DBManager:
     def __init__(self, db_name="smart_controller.db"):
@@ -81,12 +86,6 @@ class DBManager:
             cursor.execute("SELECT id, name, sensitivity FROM profiles ORDER BY id")
             return cursor.fetchall()
 
-    def update_profile_settings(self, profile_id: int, name: str, sensitivity: float):
-        with self._connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('UPDATE profiles SET name = ?, sensitivity = ? WHERE id = ?', 
-                           (name, sensitivity, profile_id))
-
     def update_profile_sensitivity(self, profile_id: int, sensitivity: float):
         """Αποθηκεύει μόνο την ευαισθησία του προφίλ."""
         with self._connection() as conn:
@@ -131,12 +130,20 @@ class DBManager:
                      threshold=None, default_threshold=0.05):
         """Αποθηκεύει τη νέα κίνηση και το όριό της.
 
+        Το πλήκτρο αποθηκεύεται πάντα στην canonical μορφή του, ώστε το ίδιο
+        προφίλ να λειτουργεί σε κάθε backend. Οι μεταφράσεις ανά backend
+        εφαρμόζονται μόνο κατά την έγχυση (``core.input_backend``).
+
         Το ``threshold=None`` διατηρεί την υπάρχουσα τιμή, ώστε μια αλλαγή
         πλήκτρου να μη μηδενίζει την ευαισθησία που είχε ορίσει ο χρήστης. Για
         νέα εγγραφή χρησιμοποιείται το ``default_threshold`` (ο καλών περνά το
         προεπιλεγμένο όριο της συγκεκριμένης κίνησης· το 0.05 μένει ως
         συμβατό fallback).
         """
+        mapped_key = canonical_key(mapped_key)
+        if not mapped_key:
+            raise ValueError("Το mapped_key δεν μπορεί να είναι κενό.")
+
         with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -161,6 +168,10 @@ class DBManager:
 
     def update_mapping(self, mapping_id: int, new_key: str, new_threshold: float):
         """Ενημερώνει το πλήκτρο και την ευαισθησία (Από το Review Window)."""
+        new_key = canonical_key(new_key)
+        if not new_key:
+            raise ValueError("Το new_key δεν μπορεί να είναι κενό.")
+
         with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -204,6 +215,40 @@ class DBManager:
             if updates:
                 cursor.executemany(
                     "UPDATE mappings SET threshold = ? WHERE id = ?",
+                    updates,
+                )
+
+            cursor.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (setting_key, "1"),
+            )
+            return len(updates)
+
+    def migrate_legacy_key_aliases(self, setting_key="key_aliases_v1"):
+        """Μετατρέπει μία φορά τα παλιά spellings πλήκτρων σε canonical μορφή.
+
+        Οι παλιές εκδόσεις αποθήκευαν ό,τι έδινε ο χρήστης/LLM (π.χ. ``Escape``,
+        ``Return``, ``L. Click``). Η μετατροπή γίνεται εδώ ώστε το ίδιο προφίλ να
+        λειτουργεί σε κάθε backend. Επιστρέφει το πλήθος των ενημερωμένων
+        εγγραφών.
+        """
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM settings WHERE key = ?", (setting_key,))
+            row = cursor.fetchone()
+            if row and str(row[0]) == "1":
+                return 0
+
+            cursor.execute("SELECT id, mapped_key FROM mappings")
+            updates = []
+            for mapping_id, stored_key in cursor.fetchall():
+                canonical = canonical_key(stored_key)
+                if canonical and canonical != stored_key:
+                    updates.append((canonical, mapping_id))
+
+            if updates:
+                cursor.executemany(
+                    "UPDATE mappings SET mapped_key = ? WHERE id = ?",
                     updates,
                 )
 

@@ -2,12 +2,14 @@ import customtkinter as ctk
 import cv2
 import mediapipe as mp
 from tkinter import messagebox
-from PIL import Image
+from PIL import Image, ImageTk
 import time
-import math
 import os
 import sys
 import json
+import queue
+import threading
+import warnings
 import ollama
 import io
 import requests
@@ -121,8 +123,12 @@ def ui_font(**kwargs):
     """CTkFont που χρησιμοποιεί πάντα οικογένεια γραμματοσειρών διαθέσιμη στο τρέχον OS."""
     return ctk.CTkFont(family=default_font_family(), **kwargs)
 
-def fetch_game_image(game_title, image_url=None, size=(180, 100)):
-    """Κατεβάζει την εικόνα του παιχνιδιού. Αν δεν υπάρχει URL, ψάχνει αυτόματα εικόνα βάσει τίτλου."""
+def download_game_image(game_title, image_url=None, size=(180, 100)):
+    """Κατεβάζει και κλιμακώνει την εικόνα του παιχνιδιού.
+
+    Επιστρέφει ``PIL.Image`` ή ``None``. Δεν δημιουργεί κανένα Tk widget, ώστε να
+    μπορεί να εκτελεστεί σε worker thread χωρίς να αγγίξει το Tk main thread.
+    """
     headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) HorusAccess/1.0"}
     
     # 1. Δοκιμή λήψης από το απευθείας URL αν υπάρχει
@@ -131,8 +137,7 @@ def fetch_game_image(game_title, image_url=None, size=(180, 100)):
             res = requests.get(image_url, headers=headers, timeout=3)
             if res.status_code == 200:
                 pil_img = Image.open(io.BytesIO(res.content)).convert("RGBA")
-                pil_img = pil_img.resize(size, Image.Resampling.LANCZOS)
-                return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
+                return pil_img.resize(size, Image.Resampling.LANCZOS)
         except Exception:
             pass
 
@@ -148,8 +153,7 @@ def fetch_game_image(game_title, image_url=None, size=(180, 100)):
                 img_res = requests.get(img_url, headers=headers, timeout=3)
                 if img_res.status_code == 200:
                     pil_img = Image.open(io.BytesIO(img_res.content)).convert("RGBA")
-                    pil_img = pil_img.resize(size, Image.Resampling.LANCZOS)
-                    return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
+                    return pil_img.resize(size, Image.Resampling.LANCZOS)
     except Exception as e:
         print(f"⚠️ Αποτυχία αυτόματης αναζήτησης εικόνας για {game_title}: {e}")
 
@@ -164,6 +168,12 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
         super().__init__(parent)
         self.parent = parent
         self._dialog = None
+        self._closed = False
+        self._ui_queue = queue.Queue()
+        self._image_labels = {}
+        self._image_jobs = []
+        self._pending_cards = []
+        self._analysis_in_progress = False
 
         self.title("Horus AI - Αυτόνομη Επιλογή Εγκατεστημένων Παιχνιδιών")
         self.geometry("950x700")
@@ -173,14 +183,17 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Ανίχνευση πραγματικών παιχνιδιών στο σύστημα
-        self.games = self.detect_installed_games()
-
+        # Η ανίχνευση τρέχει σε worker thread, ώστε το παράθυρο να ζωγραφιστεί
+        # αμέσως και το Tk event loop να μη «παγώσει» όσο διαρκεί η σάρωση.
+        self.games = []
         self._build_ui()
+        self.after(50, self._start_detection)
+        self.after(50, self._process_ui_queue)
 
 
     def _on_close(self):
         """Κλείνει το παράθυρο και τυχόν παιδικό dialog επιβεβαίωσης."""
+        self._closed = True
         if self._dialog is not None:
             try:
                 self._dialog.grab_release()
@@ -195,6 +208,40 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
         self.destroy()
 
 
+    def _post(self, callback):
+        """Ουρά για την ασφαλή μεταφορά αποτελεσμάτων από worker στο Tk thread."""
+        if not self._closed:
+            self._ui_queue.put(callback)
+
+
+    def _process_ui_queue(self):
+        """Εκτελεί στην κύρια thread ό,τι έστειλαν οι workers."""
+        if self._closed:
+            return
+
+        while True:
+            try:
+                callback = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except Exception as e:
+                print(f"⚠️ Σφάλμα κατά την ενημέρωση του παραθύρου επιλογής: {e}")
+
+        if not self._closed:
+            self.after(50, self._process_ui_queue)
+
+
+    def _start_detection(self):
+        threading.Thread(target=self._detect_games_worker, daemon=True).start()
+
+
+    def _detect_games_worker(self):
+        games = self.detect_installed_games()
+        self._post(lambda: self._on_games_loaded(games))
+
+
     def detect_installed_games(self):
         """Ανιχνεύει παιχνίδια από Steam, Epic, GOG και τον φάκελο εφαρμογών.
 
@@ -207,6 +254,127 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
             return []
 
 
+    def _on_games_loaded(self, games):
+        self.games = games
+        if self.loading_label is not None:
+            self.loading_label.destroy()
+            self.loading_label = None
+
+        if not self.games:
+            ctk.CTkLabel(
+                self.grid_frame,
+                text="⚠️ Δεν βρέθηκαν εγκατεστημένα παιχνίδια.",
+                font=ui_font(size=16),
+                text_color="#6c7281",
+            ).grid(row=0, column=0, columnspan=3, pady=60)
+            return
+
+        # Οι κάρτες προστίθενται σε μικρές ομάδες, ώστε ακόμη και μια μεγάλη
+        # βιβλιοθήκη να μην μπλοκάρει το πρώτο repaint.
+        self._pending_cards = list(enumerate(self.games))
+        self._add_pending_cards()
+
+
+    def _add_pending_cards(self):
+        if self._closed:
+            return
+
+        for _ in range(6):
+            if not self._pending_cards:
+                break
+            index, game = self._pending_cards.pop(0)
+            self._add_game_card(index, game)
+
+        if self._pending_cards:
+            self.after(1, self._add_pending_cards)
+            return
+
+        self._image_jobs = list(enumerate(self.games))
+        threading.Thread(target=self._load_images_worker, daemon=True).start()
+
+
+    def _load_images_worker(self):
+        """Κατεβάζει τις εικόνες μία-μία και τις στέλνει στο Tk thread."""
+        for index, game in self._image_jobs:
+            if self._closed:
+                return
+            image = download_game_image(
+                game_title=game.get('title', ''),
+                image_url=game.get('image_url'),
+                size=(220, 120),
+            )
+            if image is not None:
+                self._post(lambda i=index, img=image: self._set_game_image(i, img))
+
+
+    def _set_game_image(self, index, pil_image):
+        img_label = self._image_labels.get(index)
+        if img_label is None:
+            return
+        try:
+            if not img_label.winfo_exists():
+                return
+        except Exception:
+            return
+
+        ctk_img = ctk.CTkImage(
+            light_image=pil_image, dark_image=pil_image, size=(220, 120)
+        )
+        img_label.configure(image=ctk_img, text="")
+        img_label.image = ctk_img  # Garbage collection reference
+
+
+    def _add_game_card(self, index, game):
+        row = index // 3
+        col = index % 3
+
+        # Κάρτα Παιχνιδιού
+        card = ctk.CTkFrame(
+            self.grid_frame,
+            fg_color="#1f2128",
+            corner_radius=12,
+            border_color="#2b2d35",
+            border_width=1,
+        )
+        card.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
+
+        # 1. Εικόνα: placeholder τώρα, αντικαθίσταται όταν φτάσει το download.
+        img_label = ctk.CTkLabel(card, text="🎮", font=ctk.CTkFont(size=45))
+        img_label.pack(pady=(20, 10))
+        self._image_labels[index] = img_label
+
+        # 2. Τίτλος Παιχνιδιού
+        ctk.CTkLabel(
+            card,
+            text=game.get('title', 'Άγνωστο Παιχνίδι'),
+            font=ui_font(size=15, weight="bold"),
+            text_color="#ffffff",
+            wraplength=200,
+        ).pack(pady=(5, 2), padx=8)
+
+        # 3. Badge Πλατφόρμας
+        ctk.CTkLabel(
+            card,
+            text=f"• {game.get('platform', 'PC')} •",
+            font=ui_font(size=12, weight="bold"),
+            text_color="#00ffaa",
+        ).pack(pady=(0, 10))
+
+        # 4. Μεγάλο Κουμπί Επιλογής (Easy Target)
+        btn = ctk.CTkButton(
+            card,
+            text="🎯 Ανάλυση & Επιλογή",
+            font=ui_font(size=14, weight="bold"),
+            fg_color="#00f0ff",
+            text_color="#111215",
+            hover_color="#00ffaa",
+            height=48,  # Αυξημένο ύψος για εύκολη επιλογή
+            corner_radius=8,
+            command=lambda g=game: self.select_game(g),
+        )
+        btn.pack(pady=(0, 15), padx=12, fill="x")
+
+
     def _build_ui(self):
         # 1. Εμφάνιση Τίτλου
         ctk.CTkLabel(
@@ -217,63 +385,17 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
         ).pack(pady=(20, 10))
 
         # 2. Scrollable Frame για το πλέγμα των παιχνιδιών
-        grid_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        grid_frame.pack(fill="both", expand=True, padx=20, pady=10)
-        grid_frame.grid_columnconfigure((0, 1, 2), weight=1, uniform="col")
+        self.grid_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.grid_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        self.grid_frame.grid_columnconfigure((0, 1, 2), weight=1, uniform="col")
 
-        for index, game in enumerate(self.games):
-            row = index // 3
-            col = index % 3
-
-            # Κάρτα Παιχνιδιού
-            card = ctk.CTkFrame(grid_frame, fg_color="#1f2128", corner_radius=12, border_color="#2b2d35", border_width=1)
-            card.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
-
-            # 1. Προσπάθεια Φόρτωσης Εικόνας
-            ctk_img = fetch_game_image(
-                game_title=game.get('title', ''), 
-                image_url=game.get('image_url'), 
-                size=(220, 120)  # Ελαφρώς μεγαλύτερη εικόνα
-            )
-
-            if ctk_img:
-                img_label = ctk.CTkLabel(card, image=ctk_img, text="")
-                img_label.image = ctk_img  # Garbage collection reference
-                img_label.pack(pady=(12, 6), padx=10)
-            else:
-                # Fallback εικονίδιο
-                ctk.CTkLabel(card, text="🎮", font=ctk.CTkFont(size=45)).pack(pady=(20, 10))
-
-            # 2. Τίτλος Παιχνιδιού
-            ctk.CTkLabel(
-                card, 
-                text=game.get('title', 'Άγνωστο Παιχνίδι'), 
-                font=ui_font(size=15, weight="bold"),
-                text_color="#ffffff",
-                wraplength=200
-            ).pack(pady=(5, 2), padx=8)
-
-            # 3. Badge Πλατφόρμας
-            ctk.CTkLabel(
-                card, 
-                text=f"• {game.get('platform', 'PC')} •", 
-                font=ui_font(size=12, weight="bold"),
-                text_color="#00ffaa"
-            ).pack(pady=(0, 10))
-
-            # 4. Μεγάλο Κουμπί Επιλογής (Easy Target)
-            btn = ctk.CTkButton(
-                card,
-                text="🎯 Ανάλυση & Επιλογή",
-                font=ui_font(size=14, weight="bold"),
-                fg_color="#00f0ff",
-                text_color="#111215",
-                hover_color="#00ffaa",
-                height=48,  # Αυξημένο ύψος για εύκολη επιλογή
-                corner_radius=8,
-                command=lambda g=game: self.select_game(g)
-            )
-            btn.pack(pady=(0, 15), padx=12, fill="x")
+        self.loading_label = ctk.CTkLabel(
+            self.grid_frame,
+            text="⏳ Ανίχνευση εγκατεστημένων παιχνιδιών...",
+            font=ui_font(size=16),
+            text_color="#6c7281",
+        )
+        self.loading_label.grid(row=0, column=0, columnspan=3, pady=60)
 
         # 3. ΜΕΓΑΛΟ ΚΟΥΜΠΙ ΚΛΕΙΣΙΜΟΥ (Large Close Target)
         self.close_btn = ctk.CTkButton(
@@ -287,23 +409,25 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
             command=self._on_close        # Κλείνει το παράθυρο/frame
         )
         self.close_btn.pack(pady=15, padx=30, fill="x")
+
     
     def select_game(self, game):
+        if self._analysis_in_progress:
+            print("⏳ Η ανάλυση του Horus AI είναι ήδη σε εξέλιξη.")
+            return
+
+        self._analysis_in_progress = True
         print(f"🤖 [Horus AI] Αναλύονται οι λειτουργίες για: {game['title']}...")
         
         game_title_lower = game['title'].lower()
         
         # 1. Αναγνώριση Κατηγορίας
-        is_browser = any(b in game_title_lower for b in ["opera", "chrome", "edge", "firefox", "browser"])
         is_2d_platformer = any(p in game_title_lower for p in ["sonic", "mario", "celeste", "hollow knight", "limbo", "cuphead"])
         
         available_motions = list(AVAILABLE_MOTIONS)
 
         # 2. Εξειδικευμένες Οδηγίες & Επιτρεπόμενα Πλήκτρα ανά Κατηγορία
-        if is_browser:
-            context_instruction = "Η εφαρμογή είναι BROWSER. Χρησιμοποίησε ΜΟΝΟ: left_click, right_click, down, up, enter, space."
-            allowed_keys = ["left_click", "right_click", "up", "down", "space", "enter"]
-        elif is_2d_platformer:
+        if is_2d_platformer:
             context_instruction = (
                 "Η εφαρμογή είναι 2D PLATFORMER GAME (π.χ. Sonic). "
                 "ΑΠΑΓΟΡΕΥΟΝΤΑΙ ΑΥΣΤΗΡΑ ΤΑ MOUSE CLICKS! "
@@ -340,6 +464,30 @@ Respond STRICTLY with a valid JSON object matching this schema:
   ]
 }}"""
 
+        # --- FALLBACK / SAFETY NET (υπολογίζεται πριν φύγει το request) ---
+        if is_2d_platformer:
+            fallback = [
+                {"motion": "head_left", "key": "a", "description": "Κίνηση Αριστερά"},
+                {"motion": "head_right", "key": "d", "description": "Κίνηση Δεξιά"},
+                {"motion": "mouth_open", "key": "space", "description": "Άλμα (Jump)"},
+                {"motion": "head_down", "key": "s", "description": "Σκύψιμο (Crouch)"}
+            ]
+        else:
+            fallback = [
+                {"motion": "mouth_open", "key": "space", "description": "Jump / Action"},
+                {"motion": "head_up", "key": "w", "description": "Move Forward"},
+                {"motion": "head_left", "key": "a", "description": "Move Left"},
+                {"motion": "head_right", "key": "d", "description": "Move Right"}
+            ]
+
+        threading.Thread(
+            target=self._analyse_game_worker,
+            args=(game, prompt, allowed_keys, fallback),
+            daemon=True,
+        ).start()
+
+    def _analyse_game_worker(self, game, prompt, allowed_keys, fallback):
+        """Καλεί το Ollama εκτός του Tk thread και επιστρέφει το αποτέλεσμα."""
         mappings = []
         try:
             # Κλήση στο Ollama LLM
@@ -375,30 +523,16 @@ Respond STRICTLY with a valid JSON object matching this schema:
         except Exception as e:
             print(f"⚠️ Σφάλμα απόκρισης Ollama: {e}")
 
-        # --- FALLBACK / SAFETY NET ---
+        self._post(lambda: self._on_analysis_complete(game, mappings, fallback))
+
+    def _on_analysis_complete(self, game, mappings, fallback):
+        self._analysis_in_progress = False
+        if self._closed:
+            return
+
         if not mappings:
             print("⚠️ Το LLM δεν επέστρεψε mappings. Εφαρμογή έξυπνου Fallback...")
-            if is_browser:
-                mappings = [
-                    {"motion": "mouth_open", "key": "left_click", "description": "Αριστερό Κλικ (Επιλογή)"},
-                    {"motion": "eyebrows_up", "key": "right_click", "description": "Δεξί Κλικ (Μενού)"},
-                    {"motion": "head_down", "key": "down", "description": "Scroll Down"},
-                    {"motion": "head_up", "key": "up", "description": "Scroll Up"}
-                ]
-            elif is_2d_platformer:
-                mappings = [
-                    {"motion": "head_left", "key": "a", "description": "Κίνηση Αριστερά"},
-                    {"motion": "head_right", "key": "d", "description": "Κίνηση Δεξιά"},
-                    {"motion": "mouth_open", "key": "space", "description": "Άλμα (Jump)"},
-                    {"motion": "head_down", "key": "s", "description": "Σκύψιμο (Crouch)"}
-                ]
-            else:
-                mappings = [
-                    {"motion": "mouth_open", "key": "space", "description": "Jump / Action"},
-                    {"motion": "head_up", "key": "w", "description": "Move Forward"},
-                    {"motion": "head_left", "key": "a", "description": "Move Left"},
-                    {"motion": "head_right", "key": "d", "description": "Move Right"}
-                ]
+            mappings = fallback
 
         # 1. Εύρεση του πρώτου κενού προφίλ (1 έως 5)
         target_profile = None
@@ -1078,9 +1212,6 @@ class SmartControllerApp(ctk.CTk):
             self.active_mappings = {}
             self.pressed_keys = set()
             self._sens_save_job = None
-            self.is_recording_motion = False
-            self.recorded_landmarks = []
-            self.recorded_frames = []
     
             self.title("Smart Controller - Σχεδίαση & Υλοποίηση")
             self.geometry("1100x700")
@@ -1098,6 +1229,14 @@ class SmartControllerApp(ctk.CTk):
             except Exception as e:
                 print(f"⚠️ Αποτυχία μεταφοράς παλιών ορίων: {e}")
 
+            # Μία φορά: παλιά spellings πλήκτρων -> canonical μορφή.
+            try:
+                migrated_keys = self.db.migrate_legacy_key_aliases()
+                if migrated_keys:
+                    print(f"🔧 Μεταφέρθηκαν {migrated_keys} παλιά ονόματα πλήκτρων.")
+            except Exception as e:
+                print(f"⚠️ Αποτυχία μεταφοράς παλιών ονομάτων πλήκτρων: {e}")
+
             # Η ουδέτερη στάση κεφαλιού καταγράφεται μόλις ξεκινήσει η κάμερα.
             self.head_tracker = HeadPoseTracker()
             self._head_was_calibrated = False
@@ -1110,8 +1249,6 @@ class SmartControllerApp(ctk.CTk):
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5
             )
-            self.mp_drawing = mp.solutions.drawing_utils
-            self.mp_drawing_styles = mp.solutions.drawing_styles
     
             # --- Παράμετροι Ποντικιού ---
             # Χρήση του screen_size() για ασφάλεια στις διαστάσεις
@@ -1124,18 +1261,7 @@ class SmartControllerApp(ctk.CTk):
             self._app_has_focus = True
             self._focus_token = 0
 
-            self.mouse_pause_until = 0.0      
-            self.last_injected_pos = None     
-    
-            self.smooth_x, self.smooth_y = self.screen_w // 2, self.screen_h // 2
             self.virtual_x, self.virtual_y = float(self.screen_w // 2), float(self.screen_h // 2)
-            
-            self.dwell_start_time = time.time()
-            self.last_cursor_x, self.last_cursor_y = 0, 0
-            self.dwell_threshold = 30  
-            self.dwell_duration = 2.0  
-            self.is_dwelling = False
-            self.is_eyebrow_clicked = False
     
             self._build_ui()
             self.load_profile_data(self.current_profile_id)
@@ -1153,10 +1279,6 @@ class SmartControllerApp(ctk.CTk):
                     self.cap = None
             else:
                 print("✅ Η κάμερα στο ID 0 άνοιξε επιτυχώς!")
-            
-            self.neutral_nose_x = None  
-            self.neutral_nose_y = None
-            self.deadzone_radius = 0.025 
     
             # --- Σωστή εκκίνηση του Video Loop ---
             # Χρησιμοποιούμε after() ώστε το UI να προλάβει να εμφανιστεί πρώτα!
@@ -1347,6 +1469,8 @@ class SmartControllerApp(ctk.CTk):
         
         self.video_label = ctk.CTkLabel(self.video_frame, text="[ Video Stream Active ]", font=font_main, text_color=TEXT_MUTED)
         self.video_label.pack(expand=True, fill="both", padx=10, pady=10)
+        # Μία μόνο PhotoImage για όλα τα frames· ενημερώνεται in-place με paste().
+        self._video_photo = None
 
     def open_autonomous_selector(self):
         """Ανοίγει το παράθυρο πλέγματος των 6 παιχνιδιών."""
@@ -1509,7 +1633,6 @@ class SmartControllerApp(ctk.CTk):
                         target_y = int(self.virtual_y)
 
                         mouse_move(target_x, target_y)
-                        self.last_injected_pos = (target_x, target_y)
                     else:
                         # Re-sync the virtual cursor to the real pointer so the
                         # mouse does not jump once tracking resumes.
@@ -1519,7 +1642,6 @@ class SmartControllerApp(ctk.CTk):
                             self.virtual_y = float(cur_y)
                         except Exception:
                             pass
-                        self.last_injected_pos = tuple(mouse_position())
                         if not getattr(self, '_app_has_focus', False):
                             cv2.putText(rgb_frame, "PAUSED (MOUSE OVERRIDE)", (10, 30), 0, 0.8, (0, 0, 255), 2)
 
@@ -1583,9 +1705,23 @@ class SmartControllerApp(ctk.CTk):
                 self._release_all_keys()
 
             img = Image.fromarray(rgb_frame)
-            ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(640, 480))
-            self.video_label.configure(image=ctk_img)
-            self.video_label.image = ctk_img
+            if self._video_photo is None:
+                self._video_photo = ImageTk.PhotoImage(img)
+                # Το CTkLabel προειδοποιεί για μη-CTkImage· εδώ η σταθερή
+                # PhotoImage είναι σκόπιμη, ώστε να ενημερώνεται in-place.
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=".*Image can not be scaled on HighDPI displays.*",
+                        category=UserWarning,
+                    )
+                    self.video_label.configure(image=self._video_photo, text="")
+            else:
+                photo_size = (self._video_photo.width(), self._video_photo.height())
+                if img.size != photo_size:
+                    img = img.resize(photo_size, Image.Resampling.BILINEAR)
+                # Ενημερώνει την ίδια PhotoImage χωρίς νέα allocation ανά frame.
+                self._video_photo.paste(img)
 
         except Exception as global_err:
             print(f"⚠️ Σφάλμα στο update_video: {global_err}")
@@ -1616,48 +1752,6 @@ class SmartControllerApp(ctk.CTk):
             self.cap.release()
             self.cap = None
         self.destroy()
-
-    def get_all_widgets(self, parent=None):
-        if parent is None:
-            parent = self
-        widgets = []
-        try:
-            for child in parent.winfo_children():
-                widgets.append(child)
-                widgets.extend(self.get_all_widgets(child))
-        except Exception:
-            pass
-        return widgets
-
-    def apply_magnetic_snap(self, x, y, snap_threshold=50):
-        try:
-            closest_target = None
-            min_dist_length = float('inf')
-
-            for w in self.get_all_widgets():
-                if isinstance(w, (ctk.CTkButton, ctk.CTkSlider, ctk.CTkSwitch, ctk.CTkCheckBox, ctk.CTkOptionMenu)):
-                    if w.winfo_viewable():
-                        wx = w.winfo_rootx()
-                        wy = w.winfo_rooty()
-                        ww = w.winfo_width()
-                        wh = w.winfo_height()
-
-                        center_x = wx + (ww / 2)
-                        center_y = wy + (wh / 2)
-
-                        dist_length = math.hypot(x - center_x, y - center_y)
-
-                        if dist_length < snap_threshold and dist_length < min_dist_length:
-                            min_dist_length = dist_length
-                            closest_target = (int(center_x), int(center_y))
-
-            if closest_target:
-                return closest_target
-
-        except Exception:
-            pass
-
-        return x, y
 
 if __name__ == "__main__":
     app = SmartControllerApp()

@@ -119,6 +119,50 @@ class DBManagerTests(unittest.TestCase):
         self.assertEqual(migrated, 0)
         self.assertEqual(self.db.get_mappings(1)[0][3], 0.05)
 
+    def test_save_mapping_canonicalises_key_aliases(self):
+        cases = {
+            "Escape": "esc",
+            "Return": "enter",
+            "L. Click": "left_click",
+            "Middle  Click": "middle_click",
+            "Page_Up": "pageup",
+        }
+
+        for index, (alias, expected) in enumerate(cases.items()):
+            with self.subTest(alias=alias):
+                self.db.save_mapping(index + 1, "mouth_open", alias)
+                stored = self.db.get_mappings(index + 1)[0][2]
+                self.assertEqual(stored, expected)
+
+    def test_update_mapping_canonicalises_key_aliases(self):
+        self.db.save_mapping(1, "mouth_open", "space")
+        mapping_id = self.db.get_mappings(1)[0][0]
+
+        self.db.update_mapping(mapping_id, "Shift_L", 0.3)
+        self.assertEqual(self.db.get_mappings(1)[0][2], "shiftleft")
+
+    def test_legacy_key_aliases_are_migrated_once(self):
+        self.db.save_mapping(1, "mouth_open", "space")
+        self.db.save_mapping(1, "smile", "s")
+        with self.db._connection() as conn:
+            conn.executemany(
+                "UPDATE mappings SET mapped_key = ? WHERE action = ?",
+                [("Escape", "mouth_open"), ("L. Click", "smile")],
+            )
+
+        self.assertEqual(self.db.migrate_legacy_key_aliases(), 2)
+        stored = {row[1]: row[2] for row in self.db.get_mappings(1)}
+        self.assertEqual(stored, {"mouth_open": "esc", "smile": "left_click"})
+
+        # Το flag εμποδίζει δεύτερη μετατροπή.
+        self.db.save_mapping(2, "mouth_open", "space")
+        with self.db._connection() as conn:
+            conn.execute(
+                "UPDATE mappings SET mapped_key = 'Return' WHERE profile_id = 2"
+            )
+        self.assertEqual(self.db.migrate_legacy_key_aliases(), 0)
+        self.assertEqual(self.db.get_mappings(2)[0][2], "Return")
+
 
 if __name__ == "__main__":
     unittest.main()

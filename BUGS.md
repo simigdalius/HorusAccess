@@ -1,12 +1,12 @@
 # HorusAccess — Known Issues / Bug Tracker
 
 Living document for the defects found during the code review of the current
-codebase. **Batches 1 and 2 (30 items) are implemented** — see
-[Appendix C — Batch 1 resolution log](#appendix-c--batch-1-resolution-log) and
-[Appendix D — Batch 2 resolution log](#appendix-d--batch-2-resolution-log). The
-remaining 6 items are still findings waiting for a product decision or a
-separate change; the problem descriptions below stay in their pre-fix form so
-the original analysis remains readable.
+codebase. **Batches 1–3 (36 items) are implemented** — see
+[Appendix C — Batch 1 resolution log](#appendix-c--batch-1-resolution-log),
+[Appendix D — Batch 2 resolution log](#appendix-d--batch-2-resolution-log) and
+[Appendix E — Batch 3 resolution log](#appendix-e--batch-3-resolution-log). All
+findings from this review are closed; the problem descriptions below stay in
+their pre-fix form so the original analysis remains readable.
 
 | Field | Meaning |
 | --- | --- |
@@ -48,8 +48,8 @@ the original analysis remains readable.
 | BUG-015 | S2 | llm | LLM output is not validated against allowed motions/keys | fixed |
 | BUG-016 | S2 | llm | Malformed LLM reply raises `KeyError` inside a Tk callback | fixed |
 | BUG-017 | S2 | llm | Target-profile fallback silently overwrites profile 1 | fixed |
-| BUG-018 | S2 | llm | Ollama call blocks the Tk main thread (UI freeze) | open |
-| BUG-019 | S4 | llm | Browser branch is unreachable dead code | open |
+| BUG-018 | S2 | llm | Ollama call blocks the Tk main thread (UI freeze) | fixed |
+| BUG-019 | S4 | llm | Browser branch is unreachable dead code | fixed |
 | BUG-020 | S2 | detector | Quoted `Exec=` paths containing spaces break detection | fixed |
 | BUG-021 | S2 | detector | `is_valid_game` substring blacklist rejects valid games | fixed |
 | BUG-022 | S2 | detector | A single unreadable directory aborts *all* game detection | fixed |
@@ -59,17 +59,16 @@ the original analysis remains readable.
 | BUG-026 | S4 | detector | Detected game order is nondeterministic | fixed |
 | BUG-027 | S2 | input | pynput silently swallows key names outside `_PYNPUT_SPECIAL_KEYS` | fixed |
 | BUG-028 | S3 | input | Key-name mismatch between backends (`page_up` vs `pageup`) | fixed |
-| BUG-029 | S3 | input | Alias tables are inconsistent across the three backends | open |
+| BUG-029 | S3 | input | Alias tables are inconsistent across the three backends | fixed |
 | BUG-030 | S4 | input | `disable_failsafe` early-returns even when pyautogui became the driver | fixed |
-| BUG-031 | S2 | gui | Game detection + image downloads + LLM all run on the Tk thread | open |
-| BUG-032 | S3 | gui | A new `CTkImage` is allocated every frame (~66/s) | open |
+| BUG-031 | S2 | gui | Game detection + image downloads + LLM all run on the Tk thread | fixed |
+| BUG-032 | S3 | gui | A new `CTkImage` is allocated every frame (~66/s) | fixed |
 | BUG-033 | S3 | gui | `sys.path` is manipulated *after* the `core.*` imports | fixed |
 | BUG-034 | S3 | gui | Destroying the selector window can orphan its child dialog | fixed |
-| BUG-035 | S4 | gui | Dead code / unused state across the app | open |
+| BUG-035 | S4 | gui | Dead code / unused state across the app | fixed |
 | BUG-036 | S3 | gui | "left_click must be mapped" invariant relies on exact string match | fixed |
 
-**Progress:** 30 fixed (24 in batch 1 + 6 in batch 2) · 6 open (deferred — see
-[Appendix B](#appendix-b--suggested-fix-order)).
+**Progress:** 36 fixed (24 in batch 1 + 6 in batch 2 + 6 in batch 3) · 0 open.
 
 ---
 
@@ -467,6 +466,8 @@ profile to overwrite (or refuse).
 
 ### BUG-018 · S2 · Ollama call blocks the Tk main thread
 
+**Status** `fixed` in batch 3 — see [Appendix E](#appendix-e--batch-3-resolution-log).
+
 **Location** `gui/main.py:241-251`.
 
 **Problem** `ollama.chat()` is a synchronous network call that can take
@@ -479,6 +480,8 @@ to the Tk thread.
 ---
 
 ### BUG-019 · S4 · Browser branch is unreachable dead code
+
+**Status** `fixed` in batch 3 — see [Appendix E](#appendix-e--batch-3-resolution-log).
 
 **Location** `gui/main.py:188`, `gui/main.py:197-199`, `gui/main.py:272-278`.
 
@@ -658,6 +661,8 @@ name resolves on every driver.
 
 ### BUG-029 · S3 · Alias tables are inconsistent across backends
 
+**Status** `fixed` in batch 3 — see [Appendix E](#appendix-e--batch-3-resolution-log).
+
 **Location** `core/input_backend.py:84-133`.
 
 **Problem** The same logical key has different spellings depending on the
@@ -692,6 +697,8 @@ for input.
 
 ### BUG-031 · S2 · Game detection, image downloads and the LLM all run on the Tk thread
 
+**Status** `fixed` in batch 3 — see [Appendix E](#appendix-e--batch-3-resolution-log).
+
 **Location** `gui/main.py:84` (detection in `__init__`),
 `gui/main.py:124-128` + `gui/main.py:33-65` (HTTP per game card),
 `gui/main.py:241-251` (Ollama).
@@ -708,6 +715,8 @@ populate the grid incrementally; keep the LLM call off the UI thread
 ---
 
 ### BUG-032 · S3 · A new `CTkImage` is allocated every frame
+
+**Status** `fixed` in batch 3 — see [Appendix E](#appendix-e--batch-3-resolution-log).
 
 **Location** `gui/main.py:1312-1315`.
 
@@ -755,6 +764,8 @@ destroys the child dialog as well.
 ---
 
 ### BUG-035 · S4 · Dead code and unused state
+
+**Status** `fixed` in batch 3 — see [Appendix E](#appendix-e--batch-3-resolution-log).
 
 **Location**
 
@@ -848,14 +859,15 @@ pyautogui 0.9.54):
 
 > Batch 1 covered the first slice of every group and BUG-014. Batch 2 closed the
 > gesture core (BUG-001/002/003/004) and the review-window edit UI
-> (BUG-008/009). What is left, in the order it should be tackled:
+> (BUG-008/009). Batch 3 closed the remaining responsiveness, input, product and
+> cleanup items, so this order is now historical:
 
 1. **Responsiveness** — BUG-018 and BUG-031 (worker threads for detection,
    images and Ollama), then BUG-032 (per-frame `CTkImage`).
 2. **Input completeness** — BUG-029 (canonical names in storage + migration);
    the `pyautogui-darwin` aliases still need a real macOS check.
-3. **Product question** — BUG-019 (keep or remove the browser branch).
-4. **Cleanup** — BUG-035, now that BUG-009 has landed.
+3. **Product question** — BUG-019 (browser branch removed).
+4. **Cleanup** — BUG-035.
 
 ## Appendix C — Batch 1 resolution log
 
@@ -910,8 +922,9 @@ the end.
 | BUG-034 | Selector stores its child dialog in `self._dialog` and registers `WM_DELETE_WINDOW → _on_close()`, which closes the child, releases the grab and destroys itself; the close button calls the same handler. The dialog clears `_dialog` when it closes. | Code review + close-with-dialog-open scenario (below). |
 | BUG-036 | Both invariant checks compare through `canonical_key()`, so `Left Click`, `left_click` and legacy spellings all count. | Code review; `canonical_key` tests. |
 
-**Deferred at the end of batch 1** (BUG-001/002/003/004/008/009 have since been
-closed by [Appendix D](#appendix-d--batch-2-resolution-log))
+**Deferred at the end of batch 1** (all of these were subsequently closed by
+[Appendix D](#appendix-d--batch-2-resolution-log) and
+[Appendix E](#appendix-e--batch-3-resolution-log))
 
 - BUG-001/002/003/004 — need a product decision on head-gesture metrics and
   per-gesture thresholds; the fix also changes what users can map.
@@ -937,7 +950,8 @@ closed by [Appendix D](#appendix-d--batch-2-resolution-log))
 
 ## Appendix D — Batch 2 resolution log
 
-Implemented on branch `refactor` (not committed yet). Verification:
+Implemented on branch `refactor` and committed as `3fe8eb9`
+(`fix: resolve second batch of gesture and review UI bugs`). Verification:
 `.venv/bin/python -m unittest discover -s tests` → **61 tests, all passing**;
 `py_compile` clean for the three touched application modules; plus a GUI smoke
 run that built both windows against a temporary database, migrated legacy
@@ -1005,3 +1019,59 @@ of the suite because it needs a display.
 5. Try to change/delete the last `L. CLICK` mapping: it must warn, while a
    profile without any click binding can still have its other rows edited and
    deleted.
+
+## Appendix E — Batch 3 resolution log
+
+Implemented on branch `refactor` (not committed yet). Verification:
+`.venv/bin/python -m unittest discover -s tests` → **64 tests, all passing**;
+the same suite also passes with `PYTHONPATH=HorusAccess`; `py_compile` is clean
+for `gui/main.py`, `database/db_manager.py` and `core/input_backend.py`. Two
+GUI smoke scripts (not part of the suite because they need a display) ran on
+`DISPLAY=:1`: one built the selector with five fake games while a fake Ollama
+call slept, one rendered two frames through `update_video()`, and one started
+the app against a temporary database with legacy key spellings. They confirmed
+that detection, image loading and `ollama.chat()` run off the Tk thread, that
+the event loop keeps ticking during the LLM call, that video frames reuse one
+`PhotoImage`, and that the one-time key migration runs at startup.
+
+**Product decision**
+
+- BUG-019: browsers stay excluded by `is_valid_game()`; the unreachable
+  browser-specific prompt, allowed-key list and fallback mappings were removed.
+
+**Files**
+
+- `HorusAccess/gui/main.py` — selector detection/image workers and UI queue,
+  off-thread Ollama analysis, browser branch removal, single video `PhotoImage`,
+  dead-state cleanup.
+- `HorusAccess/database/db_manager.py` — canonical key writes, one-time alias
+  migration, `update_profile_settings()` removal.
+- `HorusAccess/core/input_backend.py` — unused `click()` and `tap_key()` removed.
+- `tests/test_db_manager.py` — canonical write, update and one-time migration
+  coverage.
+
+**Per bug**
+
+| Bug | Change | How it is checked |
+| --- | --- | --- |
+| BUG-018 | `select_game()` only builds the prompt on the Tk thread. A daemon worker calls Ollama (including the primary-model fallback) and posts the validated mappings through a `queue.Queue`; `_process_ui_queue()` drains it with `after(50)`. A guard ignores repeated clicks while analysis is running. | GUI smoke: `ollama.chat()` ran on a non-main thread while the event loop processed >3 timer ticks; the confirmation dialog was created afterwards. |
+| BUG-019 | Removed `is_browser`, its prompt/instructions, allowed-key list and fallback mappings. The detector still rejects Chrome/Firefox/Edge/Opera as before. | `grep` shows no `is_browser`; detector tests unchanged. |
+| BUG-029 | `save_mapping()` and `update_mapping()` store `canonical_key(...)`; aliases are translated only in `input_backend` at injection. `migrate_legacy_key_aliases()` rewrites old rows once and is called at app startup under the same pattern as the threshold migration. | `test_save_mapping_canonicalises_key_aliases`, `test_update_mapping_canonicalises_key_aliases`, `test_legacy_key_aliases_are_migrated_once`. |
+| BUG-031 | The selector opens immediately with a loading label. Detection runs in a worker; cards are created on the Tk thread in small batches when results arrive. A second worker downloads images one by one, and each `CTkImage` is created on the Tk thread via the UI queue, replacing the card placeholder incrementally. Closing the window stops further UI callbacks. | GUI smoke: loading label → 5 cards, image placeholder replaced, window responsive throughout. |
+| BUG-032 | `update_video()` keeps one `ImageTk.PhotoImage`; subsequent frames are written in place with `paste()`, resizing only if the camera frame size changes. This avoids both the per-frame `CTkImage` and the `ImageTk.PhotoImage` allocation that `CTkImage.configure()` would trigger. | GUI smoke: two `update_video()` calls kept the same `PhotoImage` object and label image. |
+| BUG-035 | Removed the listed items plus stale state found during re-checking: `is_recording_motion`, `recorded_landmarks`, `recorded_frames`, `mp_drawing`, `mp_drawing_styles`, `smooth_x/y`, all dwell state, `is_eyebrow_clicked`, `last_cursor_x/y`, `neutral_nose_x/y`, `deadzone_radius`, `mouse_pause_until`, write-only `last_injected_pos` (and a duplicate `mouse_position()` call it guarded), `get_all_widgets()`, `apply_magnetic_snap()`, `update_profile_settings()`, `click()`, `tap_key()` and the now-unused `math` import. The duplicate `ProfileReviewWindow` was already gone from batch 1. | `grep` for each symbol; `py_compile`; suite. |
+
+**Manual verification still required**
+
+1. On a machine with real Steam/Epic/GOG libraries, open the selector and confirm
+   the window paints immediately and cards appear as detection completes.
+2. Use a real Ollama model: the window should stay interactive while analysis
+   runs, and the confirmation dialog should appear with the same mappings as
+   before.
+3. With the camera running, watch CPU/allocation behaviour for a few minutes and
+   confirm the video still updates after a resolution change.
+4. Open a profile saved by an older build: legacy spellings such as `Escape`,
+   `Return` and `L. Click` should be rewritten once; a second launch must not
+   rewrite them again.
+5. Re-check Windows (`pydirectinput`) and macOS (`pyautogui-darwin`) injection
+   for the canonical names, since only Linux was exercised locally.
