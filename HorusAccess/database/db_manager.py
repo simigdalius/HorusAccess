@@ -3,8 +3,10 @@ import sqlite3
 import os
 
 try:
+    from core.gestures import canonical_motion
     from core.keys import canonical_key
 except ImportError:  # Imported as part of the HorusAccess package (tests).
+    from HorusAccess.core.gestures import canonical_motion
     from HorusAccess.core.keys import canonical_key
 
 
@@ -132,7 +134,9 @@ class DBManager:
 
         Το πλήκτρο αποθηκεύεται πάντα στην canonical μορφή του, ώστε το ίδιο
         προφίλ να λειτουργεί σε κάθε backend. Οι μεταφράσεις ανά backend
-        εφαρμόζονται μόνο κατά την έγχυση (``core.input_backend``).
+        εφαρμόζονται μόνο κατά την έγχυση (``core.input_backend``). Το ίδιο
+        ισχύει για γνωστές παλιές ονομασίες κινήσεων (π.χ. ``kiss``), ώστε να
+        μην μπορούν να δημιουργηθούν διπλές εγγραφές για την ίδια κίνηση.
 
         Το ``threshold=None`` διατηρεί την υπάρχουσα τιμή, ώστε μια αλλαγή
         πλήκτρου να μη μηδενίζει την ευαισθησία που είχε ορίσει ο χρήστης. Για
@@ -143,6 +147,10 @@ class DBManager:
         mapped_key = canonical_key(mapped_key)
         if not mapped_key:
             raise ValueError("Το mapped_key δεν μπορεί να είναι κενό.")
+
+        canonical_action = canonical_motion(action)
+        if canonical_action is not None:
+            action = canonical_action
 
         with self._connection() as conn:
             cursor = conn.cursor()
@@ -257,6 +265,49 @@ class DBManager:
                 (setting_key, "1"),
             )
             return len(updates)
+
+    def migrate_legacy_action_aliases(self, setting_key="action_aliases_v1"):
+        """Μετατρέπει μία φορά τις παλιές ονομασίες κινήσεων.
+
+        Οι παλιές εκδόσεις αποθήκευαν ``kiss`` δίπλα στο canonical
+        ``lips_pucker``. Η μετατροπή γίνεται εδώ ώστε να μην υπάρχουν δύο
+        γραμμές για την ίδια κίνηση στο ίδιο προφίλ. Αν η canonical γραμμή
+        υπάρχει ήδη, η παλιά διαγράφεται. Επιστρέφει το πλήθος των γραμμών που
+        ενοποιήθηκαν.
+        """
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM settings WHERE key = ?", (setting_key,))
+            row = cursor.fetchone()
+            if row and str(row[0]) == "1":
+                return 0
+
+            cursor.execute("SELECT id, profile_id, action FROM mappings")
+            changed = 0
+            for mapping_id, profile_id, stored_action in cursor.fetchall():
+                canonical = canonical_motion(stored_action)
+                if canonical is None or canonical == stored_action:
+                    continue
+
+                cursor.execute(
+                    "SELECT id FROM mappings "
+                    "WHERE profile_id = ? AND action = ? AND id <> ?",
+                    (profile_id, canonical, mapping_id),
+                )
+                if cursor.fetchone() is not None:
+                    cursor.execute("DELETE FROM mappings WHERE id = ?", (mapping_id,))
+                else:
+                    cursor.execute(
+                        "UPDATE mappings SET action = ? WHERE id = ?",
+                        (canonical, mapping_id),
+                    )
+                changed += 1
+
+            cursor.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (setting_key, "1"),
+            )
+            return changed
 
     # --- ΜΕΘΟΔΟΙ ΓΙΑ ΤΙΣ ΡΥΘΜΙΣΕΙΣ ---
     def get_setting(self, key: str, default=None):

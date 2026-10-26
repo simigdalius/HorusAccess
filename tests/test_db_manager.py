@@ -163,6 +163,54 @@ class DBManagerTests(unittest.TestCase):
         self.assertEqual(self.db.migrate_legacy_key_aliases(), 0)
         self.assertEqual(self.db.get_mappings(2)[0][2], "Return")
 
+    def test_save_mapping_canonicalises_action_aliases(self):
+        self.db.save_mapping(1, "kiss", "space")
+        self.assertEqual(self.db.get_mappings(1)[0][1], "lips_pucker")
+
+        self.db.save_mapping(1, "lips_pucker", "enter")
+        mappings = self.db.get_mappings(1)
+        self.assertEqual(len(mappings), 1)
+        self.assertEqual(mappings[0][2], "enter")
+
+    def test_legacy_action_aliases_are_migrated_once(self):
+        self.db.save_mapping(1, "lips_pucker", "space")
+        self.db.save_mapping(2, "mouth_open", "s")
+        with self.db._connection() as conn:
+            conn.execute(
+                "UPDATE mappings SET action = 'kiss' WHERE action = 'lips_pucker'"
+            )
+            conn.execute(
+                "UPDATE mappings SET action = 'KISS' WHERE profile_id = 2"
+            )
+
+        self.assertEqual(self.db.migrate_legacy_action_aliases(), 2)
+        stored = {
+            profile_id: {row[1]: row[2] for row in self.db.get_mappings(profile_id)}
+            for profile_id in (1, 2)
+        }
+        self.assertEqual(stored[1], {"lips_pucker": "space"})
+        self.assertEqual(stored[2], {"lips_pucker": "s"})
+
+        # Το flag εμποδίζει δεύτερη μετατροπή.
+        with self.db._connection() as conn:
+            conn.execute(
+                "UPDATE mappings SET action = 'kiss' WHERE profile_id = 1"
+            )
+        self.assertEqual(self.db.migrate_legacy_action_aliases(), 0)
+        self.assertEqual(self.db.get_mappings(1)[0][1], "kiss")
+
+    def test_legacy_action_migration_merges_into_the_canonical_row(self):
+        self.db.save_mapping(1, "lips_pucker", "space")
+        with self.db._connection() as conn:
+            conn.execute(
+                "INSERT INTO mappings (profile_id, action, mapped_key, threshold) "
+                "VALUES (1, 'kiss', 'enter', 0.2)"
+            )
+
+        self.assertEqual(self.db.migrate_legacy_action_aliases(), 1)
+        rows = self.db.get_mappings(1)
+        self.assertEqual([(row[1], row[2]) for row in rows], [("lips_pucker", "space")])
+
 
 if __name__ == "__main__":
     unittest.main()

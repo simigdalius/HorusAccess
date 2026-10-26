@@ -286,6 +286,9 @@ class SwayIPC:
         except Exception:
             return
         if node is None:
+            # The pointer crossed a gap between windows. Forget the previous id
+            # so entering the same window again still focuses it.
+            self._hovered_id = None
             return
 
         node_id = node.get("id")

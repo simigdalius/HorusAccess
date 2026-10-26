@@ -41,11 +41,12 @@ _linux_driver = "pyautogui"
 _sway = None
 _sway_error_logged = False
 
-# Physical-pointer tracking, only used with the sway backend. XWayland mirrors
-# the compositor pointer while it is over an X11 window, so the position can be
-# read back and compared with the last position we commanded. Our own warps are
-# filtered out that way, which keeps head tracking from mistaking itself for
-# the user.
+# Physical-pointer tracking. The position is read back and compared with the
+# last position we commanded, so our own warps are filtered out and head
+# tracking does not mistake itself for the user. On sway this is the only way to
+# see the compositor pointer (XWayland mirrors it only while the pointer is over
+# an X11 window); on Windows, X11 and macOS the platform pointer position is
+# available directly.
 _MOUSE_LOCK = threading.Lock()
 _MOUSE_WARP_TOLERANCE = 3
 _RECENT_WARPS = deque(maxlen=16)
@@ -177,18 +178,19 @@ def disable_failsafe():
 
 
 def _pointer_app_position():
-    """Live XWayland pointer position in the app's coordinate space.
+    """Live pointer position in the app's coordinate space.
 
-    Returns ``None`` when no position can be read. XWayland mirrors the
-    compositor pointer only while it is over an X11 window (our own window, or
-    a game), which is exactly when a physical mouse move matters.
+    Returns ``None`` when no position can be read. On sway, XWayland mirrors the
+    compositor pointer only while it is over an X11 window (our own window, or a
+    game), which is exactly when a physical mouse move matters. On the other
+    platforms the native pointer position is always available.
     """
-    if _metrics is None or _sway is None:
+    if _metrics is None:
         return None
     try:
         global_x, global_y = _metrics.position()
-        origin_x, origin_y = _sway.origin()
-        width, height = _sway.size()
+        origin_x, origin_y = screen_origin()
+        width, height = screen_size()
     except Exception:
         return None
     return (
@@ -236,9 +238,10 @@ def _remember_warp(x, y):
 def mouse_activity_count():
     """Count of physical pointer movements seen so far.
 
-    Only movements that XWayland forwards can be observed, which is enough for
-    the app's own (X11) window and for XWayland games. The counter stays at 0
-    on X11/Windows/macOS, where this module does not poll for them.
+    Our own warps are filtered out, so this only changes when the user moves the
+    real pointer. On sway the counter can only follow movements that XWayland
+    forwards (the app's own window and XWayland games), while the other
+    platforms report the native pointer position directly.
     """
     with _MOUSE_LOCK:
         return _mouse_activity
@@ -246,9 +249,11 @@ def mouse_activity_count():
 
 def mouse_move(x, y):
     global _sway, _sway_error_logged
+    # Observe physical movement before the warp below overwrites it. This runs
+    # on every backend so manual takeover works on Windows/X11/macOS too.
+    _poll_pointer()
     if _sway is not None:
         try:
-            _poll_pointer()
             width, height = _sway.size()
             target_x = max(0, min(width - 1, int(x)))
             target_y = max(0, min(height - 1, int(y)))
@@ -262,17 +267,19 @@ def mouse_move(x, y):
             # Stop using the compositor path and degrade to the X11 backend
             # instead of raising on every frame.
             _sway = None
+    target = (int(x), int(y))
+    _remember_warp(*target)
     if IS_LINUX and _linux_driver == "pynput":
-        _mouse_ctrl.position = (int(x), int(y))  # type: ignore
+        _mouse_ctrl.position = target  # type: ignore
         return
     if _driver is not None:
-        _driver.moveTo(int(x), int(y))
+        _driver.moveTo(*target)
         return
 
 
 def mouse_position():
+    _poll_pointer()
     if _sway is not None:
-        _poll_pointer()
         position = _pointer_app_position()
         if position is not None:
             return position

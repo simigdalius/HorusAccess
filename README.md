@@ -124,11 +124,11 @@ through `pynput`, so they may be ignored by native Wayland windows.
 Each IPC warp also focuses the window that the pointer lands on, emulating sway's
 `focus_follows_mouse`, so hovering another app gives it the keyboard focus and
 the app's own UI can be aimed at and clicked too. Moving the physical mouse
-pauses head tracking for a few seconds, so the cursor can be repositioned by
-hand without the tracker pulling it back every frame. That detection relies on
-XWayland's pointer position, which is only mirrored while the pointer is over an
-X11 window, so it works over the app's UI and XWayland games but not over native
-Wayland surfaces.
+pauses head tracking for a few seconds on every platform, so the cursor can be
+repositioned by hand without the tracker pulling it back every frame. On sway
+that detection relies on XWayland's pointer position, which is only mirrored
+while the pointer is over an X11 window, so it works over the app's UI and
+XWayland games but not over native Wayland surfaces.
 
 **mediapipe on Apple Silicon.** Official `mediapipe` wheels are built for
 Intel macOS; expect to build from source or use Rosetta on M-series Macs.
@@ -142,22 +142,25 @@ report a couple of families and the UI falls back to whatever remains.
 
 ```
 HorusAccess/
-├── Makefile                     setup / run / clean targets
+├── Makefile                     setup / run / test / clean targets
 ├── requirements.txt
 ├── main.py                      entry point (via make run)
 └── HorusAccess/
-    ├── main.py                  app bootstrap
-    ├── gui/gui_main.py          all windows and the face-tracking loop
+    ├── main.py                  app bootstrap (SHOW_FACE_MESH)
+    ├── gui/main.py              all windows and the face-tracking loop
     ├── core/
     │   ├── input_backend.py     mouse/keyboard + webcam, per-OS
     │   ├── game_detector.py     installed-game detection, per-OS
-    │   └── ui_utils.py          OS-aware font selection
+    │   ├── gestures.py          gesture registry, metrics, head pose
+    │   ├── keys.py              canonical key names + backend aliases
+    │   ├── sway_ipc.py          sway pointer warps / focus on Wayland
+    │   └── ui_utils.py          font selection + magnetic snap
     └── database/db_manager.py   SQLite schema and queries
 ```
 
 Run all `make` targets from the repository root.
 
-The `core/` package holds everything platform-specific — `gui/gui_main.py`
+The `core/` package holds everything platform-specific — `gui/main.py`
 contains no OS-conditional code. Game detection scans Steam (including
 secondary libraries via `libraryfolders.vdf`), Epic Games, GOG, and your
 desktop: `.lnk` shortcuts on Windows, `.desktop` entries on Linux, and `.app`

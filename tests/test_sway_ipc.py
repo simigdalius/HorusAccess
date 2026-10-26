@@ -359,6 +359,24 @@ class SwayIPCTests(unittest.TestCase):
             ["[con_id=11] focus", "[con_id=10] focus"],
         )
 
+    def test_move_refocuses_the_same_window_after_crossing_a_gap(self):
+        tree = hover_tree()
+        tree["nodes"][0]["nodes"] = tree["nodes"][0]["nodes"][:2]
+        tree["nodes"][0]["nodes"][0]["rect"] = {
+            "x": 0, "y": 0, "width": 900, "height": 1080,
+        }
+        tree["nodes"][0]["nodes"][1]["rect"] = {
+            "x": 1000, "y": 0, "width": 920, "height": 1080,
+        }
+        backend, fake = self.make_backend(HOVER_OUTPUTS, tree)
+        backend.move(500, 500)
+        backend.move(950, 500)  # gap: clears the remembered hover id
+        backend.move(500, 500)
+        self.assertEqual(
+            [command for command in fake.commands if command.endswith(" focus")],
+            ["[con_id=10] focus", "[con_id=10] focus"],
+        )
+
     def test_move_skips_focus_when_the_window_already_has_it(self):
         backend, fake = self.make_backend(HOVER_OUTPUTS, hover_tree(focused_id=11))
         backend.move(1500, 500)
