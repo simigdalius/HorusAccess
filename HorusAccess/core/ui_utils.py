@@ -6,6 +6,7 @@ with a different (usually wider) metric and the Greek text overflows. This modul
 picks the first family that actually exists on the running system.
 """
 
+import math
 import sys
 
 _PREFERRED_FAMILIES = {
@@ -38,6 +39,23 @@ def available_font_families():
         return set(tkfont.families(root))
     except Exception:
         return set()
+
+
+def snap_to_nearest(x, y, targets, threshold):
+    """Nearest target centre within ``threshold`` pixels of ``(x, y)``.
+
+    ``targets`` are ``(x, y)`` points in the same coordinate space as the input.
+    Returns the point unchanged when nothing is close enough, so callers can use
+    it as a filter on every cursor update.
+    """
+    best = None
+    best_distance = float(threshold)
+    for target_x, target_y in targets:
+        distance = math.hypot(x - target_x, y - target_y)
+        if distance < best_distance:
+            best_distance = distance
+            best = (int(target_x), int(target_y))
+    return best if best is not None else (x, y)
 
 
 def default_font_family():

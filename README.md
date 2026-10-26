@@ -94,6 +94,8 @@ exists.
   mirrored, so move your head as if looking at the screen.
 - The camera preview draws the face mesh by default. Set `SHOW_FACE_MESH =
   False` at the top of `HorusAccess/main.py` to hide the overlay.
+- Head tracking pulls the cursor to the centre of a nearby button, slider or
+  switch, so aiming at the interface does not have to be pixel-perfect.
 - **Εισαγωγή Κίνησης** — pick a facial/head motion, then a key.
 - **Εμφάνιση Κατοχωρημένων** — review, edit or delete saved mappings.
 - The sensitivity slider scales the mouse and head-tracking gain.

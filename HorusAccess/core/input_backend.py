@@ -369,6 +369,18 @@ def screen_size():
     return _metrics.size()
 
 
+def screen_origin():
+    """Top-left of the desktop in the OS's global pointer coordinates.
+
+    Windows and X11 start at ``(0, 0)``. Sway can place its output elsewhere, so
+    Tk's root coordinates have to be shifted before they can be compared with
+    the app's cursor coordinates.
+    """
+    if _sway is not None:
+        return _sway.origin()
+    return (0, 0)
+
+
 def open_webcam(index=0, width=640, height=480):
     """Opens a webcam using the capture backend that exists on this OS.
 

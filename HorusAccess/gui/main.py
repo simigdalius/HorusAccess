@@ -2,7 +2,7 @@ import customtkinter as ctk
 import cv2
 import mediapipe as mp
 import numpy as np
-from tkinter import messagebox
+from tkinter import TclError, messagebox
 from PIL import Image, ImageTk
 import time
 import os
@@ -26,6 +26,7 @@ from core.input_backend import (
     mouse_move,
     mouse_position,
     open_webcam,
+    screen_origin,
     screen_size,
     disable_failsafe,
 )
@@ -41,7 +42,7 @@ from core.gestures import (
     is_gesture_active,
     short_display_name,
 )
-from core.ui_utils import default_font_family
+from core.ui_utils import default_font_family, snap_to_nearest
 from core.game_detector import detect_installed_games
 from database.db_manager import DBManager
 
@@ -87,6 +88,23 @@ KEY_BY_LABEL = {key_label(key): key for key in KEY_CHOICES}
 # κεφάλι. Κάθε νέα φυσική κίνηση ανανεώνει το διάστημα.
 MOUSE_OVERRIDE_SECONDS = 3.0
 
+# Η ιχνηλάτηση κεφαλιού δεν σταματά ακριβώς πάνω σε ένα μικρό κουμπί. Όταν ο
+# εικονικός δείκτης βρίσκεται τόσα pixel από το κέντρο ενός χειριστηρίου, το
+# warp προσγειώνεται στο κέντρο του, ώστε το πάτημα να είναι εύκολο.
+SNAP_DISTANCE = 45
+# Η γεωμετρία αλλάζει μόνο όταν αλλάζει η διάταξη· μια πλήρης σάρωση των
+# widgets σε κάθε καρέ θα ήταν σπατάλη.
+SNAP_CACHE_SECONDS = 0.5
+
+# Χειριστήρια στα οποία «κολλάει» ο δείκτης.
+SNAP_WIDGET_TYPES = (
+    ctk.CTkButton,
+    ctk.CTkSlider,
+    ctk.CTkSwitch,
+    ctk.CTkCheckBox,
+    ctk.CTkOptionMenu,
+)
+
 
 def _validate_mappings(items, allowed_keys):
     """Κρατά μόνο τις προτάσεις του LLM που δείχνουν σε γνωστή κίνηση/πλήκτρο."""
@@ -128,6 +146,22 @@ def _validate_mappings(items, allowed_keys):
 def ui_font(**kwargs):
     """CTkFont που χρησιμοποιεί πάντα οικογένεια γραμματοσειρών διαθέσιμη στο τρέχον OS."""
     return ctk.CTkFont(family=default_font_family(), **kwargs)
+
+
+def grab_modal(window):
+    """Κάνει το ``window`` modal αφού ο window manager το εμφανίσει.
+
+    Το ``grab_set()`` αμέσως μετά τη δημιουργία ενός ``Toplevel`` μπορεί να
+    αποτύχει στο X11/XWayland με ``grab failed: window not viewable``, γιατί το
+    παράθυρο υπάρχει αλλά δεν έχει χαρτογραφηθεί ακόμη. Περιμένουμε πρώτα να
+    γίνει ορατό, ώστε το grab να είναι αξιόπιστο σε όλες τις πλατφόρμες.
+    """
+    try:
+        window.wait_visibility()
+        window.grab_set()
+    except TclError:
+        # Το παράθυρο έκλεισε όσο περίμενε· δεν υπάρχει τίποτα να κάνουμε.
+        pass
 
 def download_game_image(game_title, image_url=None, size=(180, 100)):
     """Κατεβάζει και κλιμακώνει την εικόνα του παιχνιδιού.
@@ -186,7 +220,7 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
         self.configure(fg_color="#111215")
         self.attributes("-topmost", True)
         self.resizable(False, False)
-        self.grab_set()
+        grab_modal(self)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Η ανίχνευση τρέχει σε worker thread, ώστε το παράθυρο να ζωγραφιστεί
@@ -570,7 +604,7 @@ Respond STRICTLY with a valid JSON object matching this schema:
         dialog.geometry("550x480")
         dialog.configure(fg_color="#111215")
         dialog.attributes("-topmost", True)
-        dialog.grab_set()
+        grab_modal(dialog)
 
         def close_dialog():
             self._dialog = None
@@ -990,7 +1024,7 @@ class MotionInputWindow(ctk.CTkToplevel):
         self.configure(fg_color=self.BG_MAIN)
         self.attributes("-topmost", True)
         self.resizable(False, False)
-        self.grab_set()
+        grab_modal(self)
 
         self.font_title = ui_font(size=18, weight="bold")
         self.font_labels = ui_font(size=14, weight="bold")
@@ -1220,6 +1254,8 @@ class SmartControllerApp(ctk.CTk):
             self._sens_save_job = None
             # Overlay switch, wired up in HorusAccess/main.py (SHOW_FACE_MESH).
             self.show_face_mesh = show_face_mesh
+            # (timestamp, centre points) of the controls, refreshed lazily.
+            self._snap_cache = (0.0, [])
     
             self.title("Smart Controller - Σχεδίαση & Υλοποίηση")
             self.geometry("1100x700")
@@ -1573,6 +1609,46 @@ class SmartControllerApp(ctk.CTk):
                 frame, points[self._iris_edges], False, (0, 240, 255), 1, cv2.LINE_8
             )
 
+    def _iter_snap_widgets(self, widget):
+        """Διατρέχει το δέντρο widgets και επιστρέφει τα χειριστήρια."""
+        for child in widget.winfo_children():
+            if isinstance(child, SNAP_WIDGET_TYPES):
+                yield child
+            yield from self._iter_snap_widgets(child)
+
+    def _snap_targets(self):
+        """Κέντρα των ορατών χειριστηρίων, στις συντεταγμένες του δείκτη."""
+        now = time.monotonic()
+        cached_at, targets = self._snap_cache
+        if now - cached_at < SNAP_CACHE_SECONDS:
+            return targets
+
+        origin_x, origin_y = screen_origin()
+        targets = []
+        try:
+            for widget in self._iter_snap_widgets(self):
+                if not widget.winfo_viewable():
+                    continue
+                width, height = widget.winfo_width(), widget.winfo_height()
+                if width <= 1 or height <= 1:
+                    continue
+                targets.append(
+                    (
+                        widget.winfo_rootx() + width / 2 - origin_x,
+                        widget.winfo_rooty() + height / 2 - origin_y,
+                    )
+                )
+        except Exception:
+            # Ένα widget που καταστρέφεται όσο το σαρώνουμε δεν πρέπει να
+            # σταματήσει την κίνηση του ποντικιού.
+            targets = []
+        self._snap_cache = (now, targets)
+        return targets
+
+    def _snap_cursor(self, x, y):
+        """«Κολλάει» τον δείκτη στο κέντρο κοντινού χειριστηρίου."""
+        return snap_to_nearest(x, y, self._snap_targets(), SNAP_DISTANCE)
+
     def update_video(self):
         if self.cap is None:
             return
@@ -1685,6 +1761,7 @@ class SmartControllerApp(ctk.CTk):
                         else:
                             target_x = int(self.virtual_x)
                             target_y = int(self.virtual_y)
+                            target_x, target_y = self._snap_cursor(target_x, target_y)
                             mouse_move(target_x, target_y)
                     else:
                         # Re-sync the virtual cursor to the real pointer so the
@@ -1789,7 +1866,7 @@ class SmartControllerApp(ctk.CTk):
 
     def open_review_window(self):
         review_popup = ProfileReviewWindow(self, self.current_profile_id, self.db)
-        review_popup.grab_set()
+        grab_modal(review_popup)
 
     def on_closing(self):
         if self._sens_save_job is not None:
