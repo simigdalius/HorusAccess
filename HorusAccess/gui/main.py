@@ -1,36 +1,31 @@
-import customtkinter as ctk
+import json
+import os
+import queue
+import sys
+import threading
+import time
+import warnings
+from tkinter import messagebox
+
 import cv2
+import customtkinter as ctk
 import mediapipe as mp
 import numpy as np
-from tkinter import TclError, messagebox
-from PIL import Image, ImageTk
-import time
-import os
-import sys
-import json
-import queue
-import threading
-import warnings
 import ollama
-import io
-import requests
+from PIL import Image, ImageTk
 
 # Ο φάκελος HorusAccess πρέπει να είναι στο sys.path πριν από τα imports των
 # core/database, ώστε να δουλεύει και το `python HorusAccess/gui/main.py`.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.input_backend import (
-    key_down,
-    key_up,
-    mouse_activity_count,
-    mouse_move,
-    mouse_position,
-    open_webcam,
-    screen_origin,
-    screen_size,
-    disable_failsafe,
+from core.ai_mappings import (
+    build_request,
+    ensure_left_click,
+    is_2d_platformer,
+    validate_mappings,
 )
-from core.keys import canonical_key
+from core.game_detector import detect_installed_games
+from core.game_images import download_game_image
 from core.gestures import (
     GESTURES,
     HeadPoseTracker,
@@ -42,216 +37,33 @@ from core.gestures import (
     is_gesture_active,
     short_display_name,
 )
-from core.ui_utils import default_font_family, snap_to_nearest
-from core.game_detector import detect_installed_games
+from core.input_backend import (
+    disable_failsafe,
+    key_down,
+    key_up,
+    mouse_activity_count,
+    mouse_move,
+    mouse_position,
+    open_webcam,
+    screen_size,
+)
+from core.keys import canonical_key
 from database.db_manager import DBManager
+from gui.common import (
+    KEYBOARD_LAYOUT,
+    KEY_BY_LABEL,
+    KEY_OPTION_LABELS,
+    grab_modal,
+    key_label,
+    ui_font,
+)
+from gui.snapping import SnapCursorMixin
 
-
-# Single source of truth for the gestures advertised to the user and the LLM.
-AVAILABLE_MOTIONS = list(GESTURES)
-
-KEYBOARD_LAYOUT = [
-    ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
-    ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
-    ["A", "S", "D", "F", "G", "H", "J", "K", "L", "enter"],
-    ["Z", "X", "C", "V", "B", "N", "M", "space", "up", "down"],
-    ["left", "right", "left_click", "right_click"],
-]
-
-_KEY_LABELS = {
-    "enter": "ENTER",
-    "space": "SPACE",
-    "up": "UP",
-    "down": "DOWN",
-    "left": "LEFT",
-    "right": "RIGHT",
-    "left_click": "L. CLICK",
-    "right_click": "R. CLICK",
-}
-
-
-def key_label(key):
-    """Display spelling used by the key pickers and the review window."""
-    name = canonical_key(key)
-    if name is None:
-        return str(key).upper()
-    return _KEY_LABELS.get(name, name.upper())
-
-
-KEY_CHOICES = list(dict.fromkeys(
-    canonical_key(key) for row in KEYBOARD_LAYOUT for key in row
-))
-KEY_OPTION_LABELS = [key_label(key) for key in KEY_CHOICES]
-KEY_BY_LABEL = {key_label(key): key for key in KEY_CHOICES}
 
 # Πόσο καιρό η χειροκίνητη κίνηση του ποντικιού αναστέλλει την κίνηση από το
 # κεφάλι. Κάθε νέα φυσική κίνηση ανανεώνει το διάστημα.
 MOUSE_OVERRIDE_SECONDS = 3.0
 
-# Η ιχνηλάτηση κεφαλιού δεν σταματά ακριβώς πάνω σε ένα μικρό κουμπί. Όταν ο
-# εικονικός δείκτης βρίσκεται τόσα pixel από το κέντρο ενός χειριστηρίου, το
-# warp προσγειώνεται στο κέντρο του, ώστε το πάτημα να είναι εύκολο.
-SNAP_DISTANCE = 45
-# Η γεωμετρία αλλάζει μόνο όταν αλλάζει η διάταξη· μια πλήρης σάρωση των
-# widgets σε κάθε καρέ θα ήταν σπατάλη.
-SNAP_CACHE_SECONDS = 0.5
-
-# Χειριστήρια στα οποία «κολλάει» ο δείκτης.
-SNAP_WIDGET_TYPES = (
-    ctk.CTkButton,
-    ctk.CTkSlider,
-    ctk.CTkSwitch,
-    ctk.CTkCheckBox,
-    ctk.CTkOptionMenu,
-)
-
-
-def _validate_mappings(items, allowed_keys):
-    """Κρατά μόνο τις προτάσεις του LLM που δείχνουν σε γνωστή κίνηση/πλήκτρο."""
-    valid_motions = set(AVAILABLE_MOTIONS)
-    valid_keys = {canonical_key(key) for key in allowed_keys}
-    validated = []
-    seen_motions = set()
-
-    for item in items or []:
-        if not isinstance(item, dict):
-            print(f"⚠️ Παραλείπεται μη έγκυρη πρόταση Horus AI: {item!r}")
-            continue
-
-        motion = item.get("motion")
-        key = canonical_key(item.get("key"))
-
-        if not motion or not key:
-            print(f"⚠️ Παράλειψη πρότασης χωρίς motion/key: {item!r}")
-            continue
-        if motion not in valid_motions:
-            print(f"⚠️ Παράλειψη άγνωστης κίνησης: {motion}")
-            continue
-        if key not in valid_keys:
-            print(f"⚠️ Παράλειψη μη επιτρεπτού πλήκτρου: {item.get('key')}")
-            continue
-        if motion in seen_motions:
-            continue
-
-        seen_motions.add(motion)
-        validated.append({
-            "motion": motion,
-            "key": key,
-            "description": str(item.get("description", "")),
-        })
-
-    return validated
-
-
-# Titles used by the Horus AI prompt/fallback to recognise click-free 2D
-# platformers. Everything else is treated as a mouse-driven PC game.
-_PLATFORMER_TITLE_HINTS = (
-    "sonic", "mario", "celeste", "hollow knight", "limbo", "cuphead",
-)
-
-# Preference order for the motion that gets the automatic left-click binding
-# when the LLM omits one for a mouse-driven game.
-_LEFT_CLICK_FALLBACK_ORDER = (
-    "head_down", "smile", "eyebrows_up", "left_eye_blink", "right_eye_blink",
-    "nose_scrunch", "cheek_puff", "jaw_left", "jaw_right", "head_roll",
-    "lips_pucker", "eyebrows_frown", "mouth_open", "head_up", "head_left",
-    "head_right",
-)
-
-
-def _is_2d_platformer(title):
-    """Whether ``title`` names a game that must not use mouse clicks."""
-    title = (title or "").lower()
-    return any(hint in title for hint in _PLATFORMER_TITLE_HINTS)
-
-
-def _ensure_left_click(mappings):
-    """Adds a left-click binding when a mouse-driven game has none.
-
-    The manual editors only protect the *last* click binding, so a profile
-    without one is valid (2D platformers never need it). Generic PC games do
-    need a click, and the LLM sometimes follows the schema example too closely
-    and omits it, so a spare motion is assigned automatically.
-    """
-    if any(canonical_key(item.get("key")) == "left_click" for item in mappings):
-        return mappings
-
-    used = {item.get("motion") for item in mappings}
-    candidates = list(_LEFT_CLICK_FALLBACK_ORDER) + [
-        motion for motion in AVAILABLE_MOTIONS
-        if motion not in _LEFT_CLICK_FALLBACK_ORDER
-    ]
-    for motion in candidates:
-        if motion in used or motion not in AVAILABLE_MOTIONS:
-            continue
-        print(f"🖱️ Το Horus AI δεν όρισε αριστερό κλικ· προστέθηκε {motion} -> left_click.")
-        return [
-            *mappings,
-            {
-                "motion": motion,
-                "key": "left_click",
-                "description": "Αριστερό κλικ",
-            },
-        ]
-    print("⚠️ Δεν υπάρχει ελεύθερη κίνηση για αυτόματο αριστερό κλικ.")
-    return mappings
-
-
-def ui_font(**kwargs):
-    """CTkFont που χρησιμοποιεί πάντα οικογένεια γραμματοσειρών διαθέσιμη στο τρέχον OS."""
-    return ctk.CTkFont(family=default_font_family(), **kwargs)
-
-
-def grab_modal(window):
-    """Κάνει το ``window`` modal αφού ο window manager το εμφανίσει.
-
-    Το ``grab_set()`` αμέσως μετά τη δημιουργία ενός ``Toplevel`` μπορεί να
-    αποτύχει στο X11/XWayland με ``grab failed: window not viewable``, γιατί το
-    παράθυρο υπάρχει αλλά δεν έχει χαρτογραφηθεί ακόμη. Περιμένουμε πρώτα να
-    γίνει ορατό, ώστε το grab να είναι αξιόπιστο σε όλες τις πλατφόρμες.
-    """
-    try:
-        window.wait_visibility()
-        window.grab_set()
-    except TclError:
-        # Το παράθυρο έκλεισε όσο περίμενε· δεν υπάρχει τίποτα να κάνουμε.
-        pass
-
-def download_game_image(game_title, image_url=None, size=(180, 100)):
-    """Κατεβάζει και κλιμακώνει την εικόνα του παιχνιδιού.
-
-    Επιστρέφει ``PIL.Image`` ή ``None``. Δεν δημιουργεί κανένα Tk widget, ώστε να
-    μπορεί να εκτελεστεί σε worker thread χωρίς να αγγίξει το Tk main thread.
-    """
-    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) HorusAccess/1.0"}
-    
-    # 1. Δοκιμή λήψης από το απευθείας URL αν υπάρχει
-    if image_url:
-        try:
-            res = requests.get(image_url, headers=headers, timeout=3)
-            if res.status_code == 200:
-                pil_img = Image.open(io.BytesIO(res.content)).convert("RGBA")
-                return pil_img.resize(size, Image.Resampling.LANCZOS)
-        except Exception:
-            pass
-
-    # 2. Fallback: Αυτόματη αναζήτηση εικόνας μέσω Steam API με βάση το όνομα (π.χ. Sonic Mania)
-    try:
-        search_url = f"https://store.steampowered.com/api/storesearch/?term={requests.utils.quote(game_title)}&l=english&cc=US"
-        res = requests.get(search_url, headers=headers, timeout=3)
-        if res.status_code == 200:
-            data = res.json()
-            if data.get("items"):
-                app_id = data["items"][0]["id"]
-                img_url = f"https://cdn.akamai.steamstatic.com/steam/apps/{app_id}/header.jpg"
-                img_res = requests.get(img_url, headers=headers, timeout=3)
-                if img_res.status_code == 200:
-                    pil_img = Image.open(io.BytesIO(img_res.content)).convert("RGBA")
-                    return pil_img.resize(size, Image.Resampling.LANCZOS)
-    except Exception as e:
-        print(f"⚠️ Αποτυχία αυτόματης αναζήτησης εικόνας για {game_title}: {e}")
-
-    return None
 
 # horus AI
 disable_failsafe()
@@ -515,69 +327,7 @@ class AutonomousGameSelectorWindow(ctk.CTkToplevel):
         self._analysis_in_progress = True
         print(f"🤖 [Horus AI] Αναλύονται οι λειτουργίες για: {game['title']}...")
         
-        # 1. Αναγνώριση Κατηγορίας
-        is_2d_platformer = _is_2d_platformer(game['title'])
-        
-        available_motions = list(AVAILABLE_MOTIONS)
-
-        # 2. Εξειδικευμένες Οδηγίες & Επιτρεπόμενα Πλήκτρα ανά Κατηγορία
-        if is_2d_platformer:
-            context_instruction = (
-                "Η εφαρμογή είναι 2D PLATFORMER GAME (π.χ. Sonic). "
-                "ΑΠΑΓΟΡΕΥΟΝΤΑΙ ΑΥΣΤΗΡΑ ΤΑ MOUSE CLICKS! "
-                "Χρησιμοποίησε ΜΟΝΟ keys πληκτρολογίου: w, a, s, d, space, left, right, up, down."
-            )
-            allowed_keys = ["w", "a", "s", "d", "space", "left", "right", "up", "down"]
-            click_rule = "6. Do NOT use mouse clicks if the game is a 2D Platformer or Arcade game."
-            schema_click = ""
-        else:
-            context_instruction = "Η εφαρμογή είναι GENERIC PC GAME. Χρησιμοποίησε GAMING KEYS: w, a, s, d, space, left_click."
-            allowed_keys = ["w", "a", "s", "d", "space", "left_click", "right_click", "enter"]
-            click_rule = "6. ALWAYS include exactly one motion mapped to left_click (click / attack)."
-            schema_click = ',\n    {"motion": "smile", "key": "left_click", "description": "Left Click"}'
-
-        # 3. Σύνταξη Αυστηρού Prompt
-        prompt = f"""You are an AI Accessibility Assistant for HorusAccess.
-Task: Create optimal face-motion and head-tracking to key mappings for the game '{game['title']}'.
-
-CRITICAL GAME CONTEXT:
-{context_instruction}
-
-STRICT RULES & CONSTRAINTS:
-1. KEY ANALYSIS: Inspect '{game['title']}' controls. Map ONLY keys that are ACTUALLY used by this specific game (e.g. if WASD/Space/Enter are used, restrict choices strictly to those).
-2. HEAD MOVEMENTS PRIORITY: ALWAYS prioritize head motions (head_left, head_right, head_up, head_down) for character movement keys (e.g. W, A, S, D or Arrow Keys).
-3. FACIAL GESTURES FOR ACTIONS: Use secondary facial gestures (mouth_open, eyebrows_up, smile, left_eye_blink, right_eye_blink) ONLY for action buttons (e.g. Jump, Spin Dash, Attack).
-4. ALLOWED MOTIONS: {json.dumps(available_motions)}
-5. ALLOWED KEYS ONLY FROM THIS LIST: {json.dumps(allowed_keys)}
-{click_rule}
-
-Respond STRICTLY with a valid JSON object matching this schema:
-{{
-  "mappings": [
-    {{"motion": "head_left", "key": "a", "description": "Move Left"}},
-    {{"motion": "head_right", "key": "d", "description": "Move Right"}},
-    {{"motion": "head_up", "key": "w", "description": "Move Forward / Jump"}},
-    {{"motion": "head_down", "key": "s", "description": "Crouch / Move Down"}},
-    {{"motion": "mouth_open", "key": "space", "description": "Action / Spin Dash"}}{schema_click}
-  ]
-}}"""
-
-        # --- FALLBACK / SAFETY NET (υπολογίζεται πριν φύγει το request) ---
-        if is_2d_platformer:
-            fallback = [
-                {"motion": "head_left", "key": "a", "description": "Κίνηση Αριστερά"},
-                {"motion": "head_right", "key": "d", "description": "Κίνηση Δεξιά"},
-                {"motion": "mouth_open", "key": "space", "description": "Άλμα (Jump)"},
-                {"motion": "head_down", "key": "s", "description": "Σκύψιμο (Crouch)"}
-            ]
-        else:
-            fallback = [
-                {"motion": "mouth_open", "key": "space", "description": "Jump / Action"},
-                {"motion": "head_up", "key": "w", "description": "Move Forward"},
-                {"motion": "head_left", "key": "a", "description": "Move Left"},
-                {"motion": "head_right", "key": "d", "description": "Move Right"},
-                {"motion": "head_down", "key": "left_click", "description": "Αριστερό κλικ"},
-            ]
+        prompt, allowed_keys, fallback = build_request(game['title'])
 
         threading.Thread(
             target=self._analyse_game_worker,
@@ -616,7 +366,7 @@ Respond STRICTLY with a valid JSON object matching this schema:
             else:
                 items = []
 
-            mappings = _validate_mappings(items, allowed_keys)
+            mappings = validate_mappings(items, allowed_keys)
             print(f"✅ Δημιουργήθηκαν {len(mappings)} έγκυρα mappings για το {game['title']}")
 
         except Exception as e:
@@ -633,8 +383,8 @@ Respond STRICTLY with a valid JSON object matching this schema:
             print("⚠️ Το LLM δεν επέστρεψε mappings. Εφαρμογή έξυπνου Fallback...")
             mappings = fallback
 
-        if not _is_2d_platformer(game.get('title')):
-            mappings = _ensure_left_click(mappings)
+        if not is_2d_platformer(game.get('title')):
+            mappings = ensure_left_click(mappings)
 
         # 1. Εύρεση του πρώτου κενού προφίλ (1 έως 5)
         target_profile = None
@@ -1294,7 +1044,7 @@ class MotionInputWindow(ctk.CTkToplevel):
         self.grab_release()
         self.destroy()
 
-class SmartControllerApp(ctk.CTk):
+class SmartControllerApp(SnapCursorMixin, ctk.CTk):
     def _release_all_keys(self):
         """Απελευθερώνει όλα τα πλήκτρα που κρατάει αυτή η εφαρμογή."""
         for key in list(getattr(self, "pressed_keys", ())):
@@ -1690,113 +1440,6 @@ class SmartControllerApp(ctk.CTk):
             cv2.polylines(
                 frame, points[self._iris_edges], False, (0, 240, 255), 1, cv2.LINE_8
             )
-
-    def _iter_snap_widgets(self, widget):
-        """Διατρέχει το δέντρο widgets και επιστρέφει τα χειριστήρια."""
-        for child in widget.winfo_children():
-            if isinstance(child, SNAP_WIDGET_TYPES):
-                yield child
-            yield from self._iter_snap_widgets(child)
-
-    def _active_toplevel(self):
-        """Το παράθυρο με το οποίο αλληλεπιδρά ο χρήστης, ή ``None``.
-
-        Το ``winfo_viewable()`` σημαίνει «χαρτογραφημένο», όχι «μπροστά»: ένα
-        παράθυρο σε άλλο workspace ή πίσω από ένα modal παραμένει viewable. Γι'
-        αυτό πρώτα ελέγχεται αν η εφαρμογή έχει την εστίαση και μετά επιλέγεται
-        το ανώτερο ορατό toplevel της, ώστε να μη μαζεύονται στόχοι από κρυφά
-        ή καλυμμένα χειριστήρια.
-        """
-        try:
-            grabbed = self.grab_current()
-        except TclError:
-            grabbed = None
-        if grabbed:
-            try:
-                return grabbed.winfo_toplevel()
-            except TclError:
-                return None
-
-        focused = None
-        for getter in (self.focus_displayof, self.focus_get):
-            try:
-                focused = getter()
-            except (KeyError, TclError):
-                focused = None
-            if focused is not None:
-                break
-        if not focused:
-            # Καμία εστίαση σε αυτή την εφαρμογή (π.χ. τοποθετήθηκε άλλο
-            # παράθυρο μπροστά ή αλλάξαμε workspace).
-            return None
-
-        topmost = None
-        try:
-            for path in self.tk.call("wm", "stackorder", self._w):
-                candidate = self.nametowidget(path)
-                if candidate.winfo_viewable():
-                    topmost = candidate
-        except (KeyError, TclError):
-            topmost = None
-        if topmost is not None:
-            return topmost
-        try:
-            return focused.winfo_toplevel()
-        except TclError:
-            return None
-
-    def _widget_is_exposed(self, widget, root_x, root_y):
-        """Whether the widget is the topmost thing at its centre."""
-        try:
-            top = self.winfo_containing(root_x, root_y)
-        except (KeyError, TclError):
-            return False
-        if top is None:
-            # Tk cannot tell (e.g. the point is outside every Tk window); keep
-            # the target rather than silently dropping a real control.
-            return True
-        path = str(widget)
-        actual = str(top)
-        return actual == path or actual.startswith(f"{path}.")
-
-    def _snap_targets(self):
-        """Κέντρα των ορατών χειριστηρίων, στις συντεταγμένες του δείκτη."""
-        now = time.monotonic()
-        cached_at, targets = self._snap_cache
-        if now - cached_at < SNAP_CACHE_SECONDS:
-            return targets
-
-        active = self._active_toplevel()
-        if active is None:
-            self._snap_cache = (now, [])
-            return []
-
-        origin_x, origin_y = screen_origin()
-        targets = []
-        for widget in self._iter_snap_widgets(self):
-            try:
-                if widget.winfo_toplevel()._w != active._w:
-                    continue
-                if not widget.winfo_viewable():
-                    continue
-                width, height = widget.winfo_width(), widget.winfo_height()
-                if width <= 1 or height <= 1:
-                    continue
-                root_x = widget.winfo_rootx() + width // 2
-                root_y = widget.winfo_rooty() + height // 2
-                if not self._widget_is_exposed(widget, root_x, root_y):
-                    continue
-                targets.append((root_x - origin_x, root_y - origin_y))
-            except (KeyError, TclError):
-                # Ένα widget που καταστρέφεται όσο το σαρώνουμε δεν πρέπει να
-                # σταματήσει τη σάρωση των υπόλοιπων.
-                continue
-        self._snap_cache = (now, targets)
-        return targets
-
-    def _snap_cursor(self, x, y):
-        """«Κολλάει» τον δείκτη στο κέντρο κοντινού χειριστηρίου."""
-        return snap_to_nearest(x, y, self._snap_targets(), SNAP_DISTANCE)
 
     def update_video(self):
         if self.cap is None:

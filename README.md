@@ -144,24 +144,31 @@ report a couple of families and the UI falls back to whatever remains.
 HorusAccess/
 ├── Makefile                     setup / run / test / clean targets
 ├── requirements.txt
-├── main.py                      entry point (via make run)
+├── docs/
+├── tests/                       stdlib unittest suite
 └── HorusAccess/
-    ├── main.py                  app bootstrap (SHOW_FACE_MESH)
-    ├── gui/main.py              all windows and the face-tracking loop
+    ├── main.py                  entry point / bootstrap (SHOW_FACE_MESH)
     ├── core/
-    │   ├── input_backend.py     mouse/keyboard + webcam, per-OS
+    │   ├── ai_mappings.py       Horus AI prompt, validation, click rule
     │   ├── game_detector.py     installed-game detection, per-OS
+    │   ├── game_images.py       cover-art download for the game picker
     │   ├── gestures.py          gesture registry, metrics, head pose
+    │   ├── input_backend.py     mouse/keyboard + webcam, per-OS
     │   ├── keys.py              canonical key names + backend aliases
     │   ├── sway_ipc.py          sway pointer warps / focus on Wayland
     │   └── ui_utils.py          font selection + magnetic snap
-    └── database/db_manager.py   SQLite schema and queries
+    ├── gui/
+    │   ├── common.py            key layout, fonts, modal grab
+    │   ├── main.py              app shell, windows, face-tracking loop
+    │   └── snapping.py          active-window snap targets
+    └── database/db_manager.py   SQLite schema, queries and migrations
 ```
 
 Run all `make` targets from the repository root.
 
-The `core/` package holds everything platform-specific — `gui/main.py`
-contains no OS-conditional code. Game detection scans Steam (including
+The `core/` package holds the display-light logic: input injection, gestures,
+AI mapping rules and game detection. The `gui/` package holds the Tk windows,
+shared widgets and cursor snapping. Game detection scans Steam (including
 secondary libraries via `libraryfolders.vdf`), Epic Games, GOG, and your
 desktop: `.lnk` shortcuts on Windows, `.desktop` entries on Linux, and `.app`
 bundles on macOS.
