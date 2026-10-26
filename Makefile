@@ -1,4 +1,4 @@
-.PHONY: help setup run clean
+.PHONY: help setup run test clean
 
 VENV := .venv
 PYTHON := $(VENV)/bin/python
@@ -12,6 +12,7 @@ help:
 	@echo "Targets:"
 	@echo "  make setup  - create .venv (Python 3.11/3.12) and install dependencies"
 	@echo "  make run    - launch HorusAccess"
+	@echo "  make test   - run the unit tests"
 	@echo "  make clean  - remove .venv"
 
 # Recreate the venv when python or pip is missing (partial/broken envs).
@@ -49,6 +50,13 @@ run:
 		exit 1; \
 	fi
 	PYTHONPATH=HorusAccess $(PYTHON) HorusAccess/main.py
+
+test:
+	@if [ ! -x "$(PYTHON)" ]; then \
+		echo "error: .venv missing — run 'make setup' first"; \
+		exit 1; \
+	fi
+	$(PYTHON) -m unittest discover -s tests
 
 clean:
 	rm -rf $(VENV)

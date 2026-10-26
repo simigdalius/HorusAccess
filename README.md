@@ -79,6 +79,7 @@ for the detected game category instead of failing.
 | `make help` | Lists the available targets. |
 | `make setup` | Creates `.venv` (Python 3.11/3.12, via `uv` if available) and installs `requirements.txt`. Recreates the venv if it is missing or has no `pip`. |
 | `make run` | Launches the app with `PYTHONPATH=HorusAccess .venv/bin/python HorusAccess/main.py`. Errors out if `.venv` is missing, telling you to run `make setup`. |
+| `make test` | Runs the unit tests with `.venv/bin/python -m unittest discover -s tests`. Errors out if `.venv` is missing, telling you to run `make setup`. |
 | `make clean` | Removes `.venv`. Does not touch your saved mappings. |
 
 All targets are `.PHONY`, so they work even though no file by those names
