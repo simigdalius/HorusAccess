@@ -166,6 +166,9 @@ HorusAccess/
 
 Run all `make` targets from the repository root.
 
+For module responsibilities, runtime data flow and development workflows, see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 The `core/` package holds the display-light logic: input injection, gestures,
 AI mapping rules and game detection. The `gui/` package holds the Tk windows,
 shared widgets and cursor snapping. Game detection scans Steam (including
